@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0F0A1A 0%, #1A0533 50%, #0F0A1A 100%);
+}
+
+@layer components {
+  .arcade-card {
+    @apply bg-arcade-card/80 backdrop-blur-sm border border-purple-500/30 rounded-2xl p-6 shadow-lg shadow-purple-900/20;
+  }
+  .arcade-btn {
+    @apply px-6 py-3 rounded-xl font-arcade font-bold uppercase tracking-wider transition-all duration-300;
+  }
+  .arcade-btn-primary {
+    @apply arcade-btn bg-gradient-to-r from-arcade-pink to-arcade-purple hover:scale-105 hover:shadow-lg hover:shadow-pink-500/30;
+  }
+  .arcade-btn-gold {
+    @apply arcade-btn bg-gradient-to-r from-arcade-gold to-yellow-600 text-black hover:scale-105 hover:shadow-lg hover:shadow-yellow-500/30;
+  }
+  .neon-text {
+    text-shadow: 0 0 10px rgba(219, 39, 119, 0.8), 0 0 20px rgba(219, 39, 119, 0.4);
+  }
+  .gold-text {
+    text-shadow: 0 0 10px rgba(245, 158, 11, 0.8), 0 0 20px rgba(245, 158, 11, 0.4);
+  }
+}

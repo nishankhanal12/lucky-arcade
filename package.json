@@ -1,0 +1,14 @@
+{
+  "name": "lucky-arcade",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lucky Arcade LAN Event Platform",
+  "scripts": {
+    "install:all": "cd backend && npm install && cd ../frontend && npm install",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "cd backend && npm run build && cd ../frontend && npm run build",
+    "start:backend": "cd backend && npm start",
+    "seed": "cd backend && npm run seed"
+  }
+}
