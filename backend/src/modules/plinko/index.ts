@@ -8,6 +8,15 @@ import {
 } from '../probability-engine';
 import { incrementGamesPlayed, updateLeaderboardStats, logWinner } from '../reward-engine';
 import { PlinkoForceOutcome } from '../../types';
+import {
+  generateValidatedDrop,
+  generatePath,
+  validateRoute,
+  type PlinkoRouteNode,
+} from './path-engine';
+
+export { generatePath, generateValidatedDrop, validateRoute };
+export type { PlinkoRouteNode };
 
 const GAME_ID = 1;
 const BASE_BET = parseInt(process.env.BASE_BET || '100');
@@ -30,6 +39,7 @@ interface PlinkoOutcome {
   multiplier: number;
   slotIndex: number;
   path: ('L' | 'R')[];
+  route: PlinkoRouteNode[];
   visualSeed: number;
   baseBet: number;
 }
@@ -58,22 +68,9 @@ function resolveForceSlot(force: string): number {
   return slots[Math.floor(Math.random() * slots.length)];
 }
 
-/** Exactly `targetSlot` right-deflections shuffled for natural L/R sequence. */
-export function generatePath(targetSlot: number): ('L' | 'R')[] {
-  const rights = Math.max(0, Math.min(NUM_ROWS, targetSlot));
-  const moves: ('L' | 'R')[] = [
-    ...Array(rights).fill('R' as const),
-    ...Array(NUM_ROWS - rights).fill('L' as const),
-  ];
-  for (let i = moves.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [moves[i], moves[j]] = [moves[j], moves[i]];
-  }
-  return moves;
-}
-
-export function planPlinkoDrop(targetSlot: number): { path: ('L' | 'R')[]; targetSlot: number } {
-  return { path: generatePath(targetSlot), targetSlot };
+export function planPlinkoDrop(targetSlot: number) {
+  const { path, route } = generateValidatedDrop(targetSlot);
+  return { path, route, targetSlot };
 }
 
 export async function startPlinkoGame(playerId: number, playerName: string) {
@@ -93,7 +90,7 @@ export async function startPlinkoGame(playerId: number, playerName: string) {
   }
 
   const multiplier = SLOT_VALUES[slotIndex];
-  const { path } = planPlinkoDrop(slotIndex);
+  const { path, route } = planPlinkoDrop(slotIndex);
   const visualSeed = Math.floor(Math.random() * 2147483647);
   const reward = BASE_BET * multiplier;
 
@@ -104,7 +101,7 @@ export async function startPlinkoGame(playerId: number, playerName: string) {
       playerId,
       GAME_ID,
       forcedOutcome,
-      JSON.stringify({ multiplier, slotIndex, path, visualSeed, baseBet: BASE_BET }),
+      JSON.stringify({ multiplier, slotIndex, path, route, visualSeed, baseBet: BASE_BET }),
       Math.round(reward),
       reward,
     ]
@@ -115,6 +112,7 @@ export async function startPlinkoGame(playerId: number, playerName: string) {
     multiplier,
     slotIndex,
     path,
+    route,
     visualSeed,
     baseBet: BASE_BET,
     reward,

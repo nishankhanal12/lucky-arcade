@@ -5,7 +5,7 @@ import { usePlayer } from '../context/PlayerContext';
 import { gameApi } from '../services/api';
 import { PlinkoStartResult } from '../types';
 import NameModal from '../components/ui/NameModal';
-import { PlinkoCanvasEngine, PLINKO } from '../components/games/plinkoEngine';
+import { PlinkoCanvasEngine, PLINKO, buildRouteFromPath } from '../components/games/plinkoEngine';
 
 export default function Plinko() {
   const { player, setPlayerName } = usePlayer();
@@ -79,7 +79,11 @@ export default function Plinko() {
     setGameData(data);
     engine.setHighlight(null);
 
-    engine.startDrop(data.path, data.slotIndex, data.visualSeed, async () => {
+    const route = data.route?.length
+      ? data.route
+      : buildRouteFromPath(data.path, data.slotIndex);
+
+    engine.startDrop(route, data.slotIndex, data.visualSeed, async () => {
       engine.setHighlight(data.slotIndex);
 
       const res = await gameApi.plinkoFinish(data.sessionId, p.displayName);

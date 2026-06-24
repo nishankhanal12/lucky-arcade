@@ -37,11 +37,19 @@ export interface HomeData {
   games: Game[];
 }
 
+export interface PlinkoRouteNode {
+  row: number;
+  col: number;
+  x: number;
+  y: number;
+}
+
 export interface PlinkoStartResult {
   sessionId: number;
   multiplier: number;
   slotIndex: number;
   path: ('L' | 'R')[];
+  route: PlinkoRouteNode[];
   visualSeed: number;
   baseBet: number;
   reward: number;
