@@ -1,5 +1,6 @@
 /**
  * Plinko board geometry & canvas animation engine.
+ * Ball motion uses continuous physics simulation — not peg-to-peg waypoints.
  * Runs entirely outside React render cycle via requestAnimationFrame.
  */
 
@@ -8,7 +9,7 @@ export const PLINKO = {
   NUM_SLOTS: 13,
   /** 0x | 1x | 2x | 5x | 10x | 25x | 50x | 25x | 10x | 5x | 2x | 1x | 0x */
   SLOT_VALUES: [0, 1, 2, 5, 10, 25, 50, 25, 10, 5, 2, 1, 0] as const,
-  PEG_SPACING: 0.065,
+  PEG_SPACING: 0.074,
 };
 
 export interface Point {
@@ -23,8 +24,10 @@ export interface Peg {
   y: number;
 }
 
-export interface Keyframe extends Point {
+export interface TrajectorySample extends Point {
   t: number;
+  vx: number;
+  vy: number;
 }
 
 export interface Particle {
@@ -36,15 +39,41 @@ export interface Particle {
   hue: number;
 }
 
+const BOARD = {
+  TOP: 0.06,
+  PEG_BOTTOM: 0.73,
+  SLOT_Y: 0.88,
+  SPAWN_X: 0.5,
+  SPAWN_Y: 0.035,
+};
+
+const PHYSICS = {
+  GRAVITY: 0.00042,
+  DEFLECT_VAR: 0.0018,
+  BOUNCE_DAMP: 0.86,
+  FRICTION: 0.993,
+  MAX_VX: 0.018,
+  MIN_VY: 0.001,
+  DT: 0.014,
+  SAMPLE_MS: 8,
+};
+
 function slotToX(slot: number): number {
-  const m = 0.028;
+  const m = 0.032;
   return m + (slot / (PLINKO.NUM_SLOTS - 1)) * (1 - 2 * m);
 }
 
 function rowY(row: number): number {
-  const top = 0.1;
-  const bottom = 0.74;
+  const top = BOARD.TOP;
+  const bottom = BOARD.PEG_BOTTOM;
   return top + ((row + 0.5) / PLINKO.NUM_ROWS) * (bottom - top);
+}
+
+function pegFieldBounds(row: number): { min: number; max: number } {
+  const count = row + 3;
+  const half = ((count - 1) / 2) * PLINKO.PEG_SPACING;
+  const pad = PLINKO.PEG_SPACING * 0.35;
+  return { min: 0.5 - half - pad, max: 0.5 + half + pad };
 }
 
 function seededRandom(seed: number): () => number {
@@ -86,97 +115,242 @@ export function generateLRPath(targetSlot: number): ('L' | 'R')[] {
   return moves;
 }
 
-/** Build timed keyframes for Catmull-Rom spline — continuous flow through peg lanes. */
-export function buildTrajectory(path: ('L' | 'R')[], targetSlot: number, seed: number): Keyframe[] {
+/**
+ * Simulate a marble falling through the peg field.
+ * L/R path steers deflections at each row; gravity dominates motion.
+ * Returns dense time-stamped samples for smooth playback.
+ */
+export function simulateTrajectory(
+  path: ('L' | 'R')[],
+  targetSlot: number,
+  seed: number,
+): TrajectorySample[] {
   const rand = seededRandom(seed);
-  const kf: Keyframe[] = [];
-  let rights = 0;
-  let time = 0;
+  const samples: TrajectorySample[] = [];
 
-  kf.push({ x: 0.5 + (rand() - 0.5) * 0.01, y: 0.02, t: time });
-
-  for (let row = 0; row < path.length; row++) {
-    const laneX = slotToX(rights);
-    const y = rowY(row);
-    const wobble = (rand() - 0.5) * 0.012;
-
-    time += 70 + rand() * 25;
-    kf.push({ x: laneX + wobble, y: y - 0.028, t: time });
-
-    time += 55 + rand() * 20;
-    kf.push({ x: laneX + wobble * 0.4, y: y - 0.006, t: time });
-
-    time += 40;
-    kf.push({ x: laneX, y, t: time });
-
-    if (path[row] === 'R') rights++;
-
-    const nextLane = slotToX(rights);
-    const midX = laneX + (nextLane - laneX) * (0.28 + rand() * 0.12);
-
-    time += 48;
-    kf.push({ x: midX, y: y + 0.006, t: time });
-
-    time += 58 + rand() * 22;
-    kf.push({
-      x: nextLane + (rand() - 0.5) * 0.008,
-      y: y + 0.018 + rand() * 0.004,
-      t: time,
-    });
-  }
+  let x = BOARD.SPAWN_X;
+  let y = BOARD.SPAWN_Y;
+  let vx = 0;
+  let vy = PHYSICS.MIN_VY;
+  let t = 0;
+  let rowCrossed = -1;
 
   const finalX = slotToX(targetSlot);
-  time += 140;
-  kf.push({ x: finalX, y: 0.78, t: time });
-  time += 200;
-  kf.push({ x: finalX + (rand() - 0.5) * 0.004, y: 0.84, t: time });
-  time += 220;
-  kf.push({ x: finalX, y: 0.875, t: time });
-  time += 180;
-  kf.push({ x: finalX + 0.004, y: 0.892, t: time });
-  time += 160;
-  kf.push({ x: finalX, y: 0.898, t: time });
+  const slotStep = (slotToX(1) - slotToX(0));
 
-  return kf;
-}
-
-function catmullRom(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
-  const t2 = t * t;
-  const t3 = t2 * t;
-  return {
-    x: 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
-    y: 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+  const pushSample = () => {
+    samples.push({ x, y, t, vx, vy });
   };
+
+  pushSample();
+
+  let nextSampleT = PHYSICS.SAMPLE_MS;
+  const maxSteps = 14000;
+  let steps = 0;
+
+  while (y < BOARD.SLOT_Y + 0.05 && steps < maxSteps) {
+    steps++;
+    const dt = PHYSICS.DT;
+    t += dt * 16.67;
+
+    vy += PHYSICS.GRAVITY;
+    vy = Math.max(vy, PHYSICS.MIN_VY);
+
+    x += vx * dt;
+    y += vy * dt;
+
+    const currentRow = Math.min(
+      PLINKO.NUM_ROWS - 1,
+      Math.floor(((y - BOARD.TOP) / (BOARD.PEG_BOTTOM - BOARD.TOP)) * PLINKO.NUM_ROWS),
+    );
+
+    if (currentRow > rowCrossed && currentRow < PLINKO.NUM_ROWS) {
+      rowCrossed = currentRow;
+      const move = path[currentRow];
+      const variance = (rand() - 0.5) * PHYSICS.DEFLECT_VAR;
+      const peg = findNearestPeg(x, y, currentRow);
+
+      const deflect = slotStep * (0.42 + rand() * 0.08);
+      if (move === 'R') {
+        vx += deflect + variance;
+      } else {
+        vx -= deflect + variance;
+      }
+
+      if (peg) {
+        const away = x - peg.x;
+        vx += away * 0.06;
+        vy *= PHYSICS.BOUNCE_DAMP;
+      }
+
+      vy = Math.max(vy, PHYSICS.MIN_VY);
+    }
+
+    const bounds = pegFieldBounds(Math.max(0, Math.min(PLINKO.NUM_ROWS - 1, currentRow)));
+    const innerMin = bounds.min + PLINKO.PEG_SPACING * 0.22;
+    const innerMax = bounds.max - PLINKO.PEG_SPACING * 0.22;
+
+    if (x < innerMin) {
+      x = innerMin;
+      vx = Math.abs(vx) * 0.18;
+    } else if (x > innerMax) {
+      x = innerMax;
+      vx = -Math.abs(vx) * 0.18;
+    }
+
+    vx *= PHYSICS.FRICTION;
+    vx = Math.max(-PHYSICS.MAX_VX, Math.min(PHYSICS.MAX_VX, vx));
+
+    if (y > BOARD.PEG_BOTTOM + 0.02) {
+      const dropZone = (y - BOARD.PEG_BOTTOM) / (BOARD.SLOT_Y - BOARD.PEG_BOTTOM);
+      vy *= 1 - Math.min(0.015, dropZone * 0.012);
+    }
+
+    if (t >= nextSampleT) {
+      pushSample();
+      nextSampleT += PHYSICS.SAMPLE_MS;
+    }
+  }
+
+  const landingSamples = buildLandingPhase(
+    samples[samples.length - 1],
+    finalX,
+  );
+  for (const s of landingSamples) {
+    samples.push(s);
+  }
+
+  return samples;
 }
 
-function sampleSpline(keyframes: Keyframe[], elapsed: number, wobblePhase: number): { pos: Point; rot: number; vy: number } {
-  const total = keyframes[keyframes.length - 1].t;
-  const clamped = Math.min(elapsed, total);
+function findNearestPeg(x: number, y: number, row: number): Peg | null {
+  const count = row + 3;
+  const py = rowY(row);
+  if (Math.abs(y - py) > 0.04) return null;
 
-  let seg = 0;
-  while (seg < keyframes.length - 2 && keyframes[seg + 1].t < clamped) seg++;
+  let best: Peg | null = null;
+  let bestDist = Infinity;
+  for (let col = 0; col < count; col++) {
+    const px = 0.5 + (col - (count - 1) / 2) * PLINKO.PEG_SPACING;
+    const d = Math.hypot(x - px, y - py);
+    if (d < bestDist) {
+      bestDist = d;
+      best = { row, col, x: px, y: py };
+    }
+  }
+  return best;
+}
 
-  const k0 = keyframes[Math.max(0, seg - 1)];
-  const k1 = keyframes[seg];
-  const k2 = keyframes[Math.min(keyframes.length - 1, seg + 1)];
-  const k3 = keyframes[Math.min(keyframes.length - 1, seg + 2)];
+function buildLandingPhase(
+  last: TrajectorySample,
+  finalX: number,
+): TrajectorySample[] {
+  const out: TrajectorySample[] = [];
+  let { x, y, t, vx, vy } = { ...last };
 
-  const segDur = k2.t - k1.t || 1;
-  let u = (clamped - k1.t) / segDur;
-  u = u * u * (3 - 2 * u);
+  vx *= 0.6;
+  vy = Math.max(vy, 0.0012);
 
-  const pos = catmullRom(k0, k1, k2, k3, u);
+  const slotHalf = (slotToX(1) - slotToX(0)) * 0.38;
+  let bounced = false;
+  let settled = false;
+  const maxSteps = 800;
 
-  const progress = clamped / total;
-  const wobbleAmp = 0.006 * (1 - progress * 0.85);
-  pos.x += Math.sin(wobblePhase * 0.09 + seg * 1.7) * wobbleAmp;
-  pos.y += Math.cos(wobblePhase * 0.07 + seg * 2.1) * wobbleAmp * 0.4;
+  for (let step = 0; step < maxSteps; step++) {
+    t += PHYSICS.SAMPLE_MS;
+    const dt = PHYSICS.DT;
 
-  const next = catmullRom(k0, k1, k2, k3, Math.min(1, u + 0.02));
-  const rot = Math.atan2(next.y - pos.y, next.x - pos.x) * (180 / Math.PI);
-  const vy = (next.y - pos.y) / 0.02;
+    vy += PHYSICS.GRAVITY * 0.85;
+    x += vx * dt;
+    y += vy * dt;
 
-  return { pos, rot, vy };
+    if (x < finalX - slotHalf) {
+      x = finalX - slotHalf;
+      vx = Math.abs(vx) * 0.35;
+    } else if (x > finalX + slotHalf) {
+      x = finalX + slotHalf;
+      vx = -Math.abs(vx) * 0.35;
+    }
+
+    if (y >= BOARD.SLOT_Y && vy > 0) {
+      y = BOARD.SLOT_Y;
+      vy = -vy * (bounced ? 0.28 : 0.42);
+      vx *= 0.72;
+      bounced = true;
+    }
+
+    vx *= 0.97;
+    vy *= 0.998;
+
+    if (bounced && Math.abs(vy) < 0.00025 && y >= BOARD.SLOT_Y - 0.002) {
+      vy = 0;
+      vx *= 0.82;
+      x += (finalX - x) * 0.04;
+      settled = true;
+    }
+
+    out.push({ x, y, t, vx, vy });
+
+    if (settled && step > 40) break;
+    if (y > BOARD.SLOT_Y + 0.025 && bounced) break;
+  }
+
+  const restSteps = Math.ceil(220 / PHYSICS.SAMPLE_MS);
+  for (let i = 0; i < restSteps; i++) {
+    t += PHYSICS.SAMPLE_MS;
+    x += (finalX - x) * 0.06;
+    y = BOARD.SLOT_Y + 0.006 + Math.sin(i * 0.4) * 0.001 * Math.max(0, 1 - i / restSteps);
+    out.push({ x, y, t, vx: 0, vy: 0 });
+  }
+
+  return out;
+}
+
+function hermite(p0: number, v0: number, p1: number, v1: number, u: number): number {
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return (
+    (2 * u3 - 3 * u2 + 1) * p0 +
+    (u3 - 2 * u2 + u) * v0 +
+    (-2 * u3 + 3 * u2) * p1 +
+    (u3 - u2) * v1
+  );
+}
+
+function sampleTrajectory(
+  samples: TrajectorySample[],
+  elapsed: number,
+): { pos: Point; rot: number; vy: number; speed: number } {
+  const total = samples[samples.length - 1].t;
+  const clamped = Math.min(Math.max(0, elapsed), total);
+
+  let i = 0;
+  while (i < samples.length - 2 && samples[i + 1].t < clamped) i++;
+
+  const s0 = samples[Math.max(0, i - 1)];
+  const s1 = samples[i];
+  const s2 = samples[Math.min(samples.length - 1, i + 1)];
+  const s3 = samples[Math.min(samples.length - 1, i + 2)];
+
+  const segDur = s2.t - s1.t || 1;
+  const u = (clamped - s1.t) / segDur;
+
+  const pos: Point = {
+    x: hermite(s1.x, (s2.x - s0.x) * 0.5, s2.x, (s3.x - s1.x) * 0.5, u),
+    y: hermite(s1.y, (s2.y - s0.y) * 0.5, s2.y, (s3.y - s1.y) * 0.5, u),
+  };
+
+  const nextU = Math.min(1, u + 0.03);
+  const nextX = hermite(s1.x, (s2.x - s0.x) * 0.5, s2.x, (s3.x - s1.x) * 0.5, nextU);
+  const nextY = hermite(s1.y, (s2.y - s0.y) * 0.5, s2.y, (s3.y - s1.y) * 0.5, nextU);
+
+  const dx = nextX - pos.x;
+  const dy = nextY - pos.y;
+  const speed = Math.hypot(dx, dy);
+  const vy = dy / 0.03;
+  const rot = Math.atan2(dx, dy) * (180 / Math.PI);
+
+  return { pos, rot, vy, speed };
 }
 
 const SLOT_COLORS: Record<number, string> = {
@@ -202,13 +376,13 @@ export class PlinkoCanvasEngine {
   private rafId = 0;
   private particles: Particle[] = [];
   private highlightSlot: number | null = null;
-  private ball = { x: 0.5, y: 0.02, rot: 0, visible: false, scale: 1 };
+  private ball = { x: BOARD.SPAWN_X, y: BOARD.SPAWN_Y, rot: 0, roll: 0, visible: false, scale: 1 };
   private animStart = 0;
-  private keyframes: Keyframe[] = [];
-  private wobblePhase = 0;
+  private trajectory: TrajectorySample[] = [];
   private targetSlot = 0;
   private onComplete: (() => void) | null = null;
   private landingDone = false;
+  private lastElapsed = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d');
@@ -242,29 +416,39 @@ export class PlinkoCanvasEngine {
   startDrop(path: ('L' | 'R')[], targetSlot: number, seed: number, onComplete: () => void): void {
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.targetSlot = targetSlot;
-    this.keyframes = buildTrajectory(path, targetSlot, seed);
+    this.trajectory = simulateTrajectory(path, targetSlot, seed);
     this.onComplete = onComplete;
     this.particles = [];
     this.landingDone = false;
-    this.highlightSlot = null;
-    this.ball = { x: 0.5, y: 0.02, rot: 0, visible: true, scale: 1 };
-    this.wobblePhase = seed;
+    this.lastElapsed = 0;
+    this.ball = {
+      x: BOARD.SPAWN_X,
+      y: BOARD.SPAWN_Y,
+      rot: 0,
+      roll: 0,
+      visible: true,
+      scale: 1,
+    };
     this.animStart = performance.now();
     this.rafId = requestAnimationFrame(this.tick);
   }
 
   private tick = (now: number): void => {
     const elapsed = now - this.animStart;
-    const total = this.keyframes[this.keyframes.length - 1]?.t ?? 1;
+    const total = this.trajectory[this.trajectory.length - 1]?.t ?? 1;
 
-    if (this.keyframes.length > 1) {
-      const { pos, rot, vy } = sampleSpline(this.keyframes, elapsed, this.wobblePhase);
+    if (this.trajectory.length > 1) {
+      const { pos, rot, vy, speed } = sampleTrajectory(this.trajectory, elapsed);
+      const dt = Math.max(1, elapsed - this.lastElapsed);
+      this.lastElapsed = elapsed;
+
       this.ball.x = pos.x;
       this.ball.y = pos.y;
-      this.ball.rot = rot + Math.sin(elapsed * 0.015) * 8;
-      this.ball.scale = 1 + Math.min(0.12, vy * 0.8);
+      this.ball.roll += speed * dt * 0.35;
+      this.ball.rot = rot * 0.15 + this.ball.roll;
+      this.ball.scale = 1 + Math.min(0.06, Math.abs(vy) * 0.4);
 
-      const landingStart = total * 0.88;
+      const landingStart = total * 0.86;
       if (elapsed > landingStart && !this.landingDone) {
         this.landingDone = true;
         this.highlightSlot = this.targetSlot;
@@ -275,7 +459,7 @@ export class PlinkoCanvasEngine {
     this.updateParticles();
     this.draw();
 
-    if (elapsed < total + 400) {
+    if (elapsed < total + 350) {
       this.rafId = requestAnimationFrame(this.tick);
     } else {
       this.ball.scale = 1;
@@ -286,12 +470,12 @@ export class PlinkoCanvasEngine {
   private spawnCoins(x: number, y: number): void {
     for (let i = 0; i < 24; i++) {
       const angle = (Math.PI * 2 * i) / 24 + Math.random() * 0.5;
-      const speed = 0.002 + Math.random() * 0.004;
+      const spd = 0.002 + Math.random() * 0.004;
       this.particles.push({
         x,
         y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 0.003,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd - 0.003,
         life: 1,
         hue: 45 + Math.random() * 20,
       });
@@ -315,27 +499,46 @@ export class PlinkoCanvasEngine {
     this.draw();
   }
 
+  private pegRadius(): number {
+    return Math.max(2.5, this.w * 0.0055);
+  }
+
+  private ballRadius(): number {
+    return Math.max(7, this.w * 0.0078);
+  }
+
   private draw(): void {
     const { ctx, w, h } = this;
     ctx.clearRect(0, 0, w, h);
 
     const bg = ctx.createLinearGradient(0, 0, 0, h);
-    bg.addColorStop(0, '#0c0420');
-    bg.addColorStop(0.5, '#15082e');
-    bg.addColorStop(1, '#0a0618');
+    bg.addColorStop(0, '#08021a');
+    bg.addColorStop(0.45, '#120828');
+    bg.addColorStop(1, '#060312');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
 
-    ctx.strokeStyle = 'rgba(168,85,247,0.35)';
+    ctx.save();
+    ctx.shadowColor = 'rgba(168,85,247,0.45)';
+    ctx.shadowBlur = 24;
+    ctx.strokeStyle = 'rgba(168,85,247,0.5)';
     ctx.lineWidth = 2;
-    ctx.strokeRect(8, 8, w - 16, h - 16);
+    ctx.strokeRect(6, 6, w - 12, h - 12);
+    ctx.restore();
 
-    const glass = ctx.createLinearGradient(0, 0, w, h);
-    glass.addColorStop(0, 'rgba(255,255,255,0.04)');
-    glass.addColorStop(0.5, 'rgba(255,255,255,0)');
-    glass.addColorStop(1, 'rgba(168,85,247,0.06)');
-    ctx.fillStyle = glass;
-    ctx.fillRect(8, 8, w - 16, h - 16);
+    const innerGlow = ctx.createLinearGradient(0, 0, w, h);
+    innerGlow.addColorStop(0, 'rgba(255,255,255,0.06)');
+    innerGlow.addColorStop(0.35, 'rgba(255,255,255,0.01)');
+    innerGlow.addColorStop(0.7, 'rgba(168,85,247,0.04)');
+    innerGlow.addColorStop(1, 'rgba(99,102,241,0.06)');
+    ctx.fillStyle = innerGlow;
+    ctx.fillRect(10, 10, w - 20, h - 20);
+
+    const vignette = ctx.createRadialGradient(w / 2, h * 0.4, w * 0.1, w / 2, h * 0.45, w * 0.65);
+    vignette.addColorStop(0, 'rgba(255,255,255,0.03)');
+    vignette.addColorStop(1, 'rgba(0,0,0,0.25)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(10, 10, w - 20, h - 20);
 
     this.drawSlots();
     this.drawPegs();
@@ -348,69 +551,82 @@ export class PlinkoCanvasEngine {
 
   private drawPegs(): void {
     const { ctx, w, h, pegs } = this;
+    const r = this.pegRadius();
+
     for (const peg of pegs) {
       const px = peg.x * w;
       const py = peg.y * h;
-      const r = Math.max(4, w * 0.011);
 
       ctx.beginPath();
-      ctx.ellipse(px, py + r * 0.6, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.ellipse(px, py + r * 0.7, r * 0.85, r * 0.28, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
       ctx.fill();
 
-      const glow = ctx.createRadialGradient(px - r * 0.2, py - r * 0.2, 0, px, py, r * 1.8);
-      glow.addColorStop(0, '#ffffff');
-      glow.addColorStop(0.35, '#e9d5ff');
-      glow.addColorStop(0.7, '#a855f7');
-      glow.addColorStop(1, '#6b21a8');
+      const metal = ctx.createRadialGradient(px - r * 0.35, py - r * 0.35, r * 0.05, px, py, r * 1.4);
+      metal.addColorStop(0, '#f8fafc');
+      metal.addColorStop(0.25, '#cbd5e1');
+      metal.addColorStop(0.55, '#94a3b8');
+      metal.addColorStop(0.85, '#64748b');
+      metal.addColorStop(1, '#334155');
 
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.fillStyle = glow;
+      ctx.fillStyle = metal;
       ctx.fill();
 
       ctx.beginPath();
-      ctx.arc(px - r * 0.25, py - r * 0.25, r * 0.25, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.arc(px - r * 0.32, py - r * 0.32, r * 0.22, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(px + r * 0.15, py + r * 0.2, r * 0.12, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
       ctx.fill();
     }
   }
 
   private drawSlots(): void {
     const { ctx, w, h } = this;
-    const slotH = h * 0.1;
-    const slotTop = h - slotH - 6;
-    const gap = 2;
+    const slotH = h * 0.095;
+    const slotTop = h - slotH - 8;
+    const gap = 2.5;
 
     for (let i = 0; i < PLINKO.NUM_SLOTS; i++) {
       const mult = PLINKO.SLOT_VALUES[i];
-      const x0 = slotToX(i) * w - (w / PLINKO.NUM_SLOTS) * 0.42;
+      const x0 = slotToX(i) * w - (w / PLINKO.NUM_SLOTS) * 0.44;
       const sw = w / PLINKO.NUM_SLOTS - gap;
       const isHi = this.highlightSlot === i;
+      const base = slotColor(mult);
 
       const grad = ctx.createLinearGradient(x0, slotTop, x0, slotTop + slotH);
-      const base = slotColor(mult);
-      grad.addColorStop(0, isHi ? '#ffffff' : base);
-      grad.addColorStop(1, isHi ? base : '#1a1025');
+      grad.addColorStop(0, isHi ? '#ffffff' : `${base}cc`);
+      grad.addColorStop(0.4, isHi ? base : `${base}88`);
+      grad.addColorStop(1, '#0f0818');
 
       ctx.fillStyle = grad;
       ctx.beginPath();
-      ctx.roundRect(x0, slotTop, sw, slotH, [6, 6, 0, 0]);
+      ctx.roundRect(x0, slotTop, sw, slotH, [5, 5, 0, 0]);
       ctx.fill();
 
+      ctx.strokeStyle = isHi ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = isHi ? 2 : 1;
+      ctx.stroke();
+
       if (isHi) {
+        ctx.save();
         ctx.shadowColor = base;
-        ctx.shadowBlur = 18;
+        ctx.shadowBlur = 22;
         ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1.5;
         ctx.stroke();
-        ctx.shadowBlur = 0;
+        ctx.restore();
       }
 
-      ctx.fillStyle = isHi ? '#fff' : '#e5e7eb';
-      ctx.font = `bold ${Math.max(9, sw * 0.22)}px Orbitron, sans-serif`;
+      ctx.fillStyle = isHi ? '#fff' : '#d1d5db';
+      ctx.font = `bold ${Math.max(8, sw * 0.21)}px Orbitron, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(`${mult}x`, x0 + sw / 2, slotTop + slotH * 0.62);
+      ctx.fillText(`${mult}x`, x0 + sw / 2, slotTop + slotH * 0.64);
     }
   }
 
@@ -418,36 +634,57 @@ export class PlinkoCanvasEngine {
     const { ctx, w, h, ball } = this;
     const px = ball.x * w;
     const py = ball.y * h;
-    const r = Math.max(9, w * 0.014) * ball.scale;
+    const r = this.ballRadius() * ball.scale;
+
+    const shadowScale = 1 + (1 - ball.y) * 0.35;
+    const shadowAlpha = 0.15 + ball.y * 0.35;
+    const shadowBlur = 4 + (1 - ball.y) * 10;
 
     ctx.save();
+    ctx.filter = `blur(${shadowBlur}px)`;
+    ctx.beginPath();
+    ctx.ellipse(px, py + r * 1.1, r * 0.75 * shadowScale, r * 0.22 * shadowScale, 0, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,0,0,${shadowAlpha})`;
+    ctx.fill();
+    ctx.filter = 'none';
+
     ctx.translate(px, py);
     ctx.rotate((ball.rot * Math.PI) / 180);
 
-    ctx.beginPath();
-    ctx.ellipse(0, r * 0.85, r * 0.85, r * 0.28, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(0,0,0,0.4)';
-    ctx.fill();
-
-    const ballGrad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
-    ballGrad.addColorStop(0, '#fef9c3');
-    ballGrad.addColorStop(0.45, '#fbbf24');
-    ballGrad.addColorStop(1, '#b45309');
+    const marble = ctx.createRadialGradient(-r * 0.35, -r * 0.35, r * 0.05, r * 0.08, r * 0.1, r);
+    marble.addColorStop(0, 'rgba(255,255,255,0.95)');
+    marble.addColorStop(0.12, '#fde68a');
+    marble.addColorStop(0.35, '#f59e0b');
+    marble.addColorStop(0.65, '#d97706');
+    marble.addColorStop(0.88, '#92400e');
+    marble.addColorStop(1, '#78350f');
 
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
-    ctx.fillStyle = ballGrad;
+    ctx.fillStyle = marble;
+    ctx.fill();
+
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.arc(r * 0.15, r * 0.2, r * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff7ed';
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.beginPath();
+    ctx.arc(-r * 0.32, -r * 0.32, r * 0.2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
     ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(-r * 0.28, -r * 0.28, r * 0.22, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.arc(-r * 0.12, -r * 0.42, r * 0.08, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(251,191,36,0.5)';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(0, 0, r * 0.85, 0.3, Math.PI * 0.7);
+    ctx.arc(0, 0, r * 0.92, 0.2, Math.PI * 0.55);
     ctx.stroke();
 
     ctx.restore();
