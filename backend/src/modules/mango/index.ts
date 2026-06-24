@@ -1,4 +1,5 @@
 import { insert, query, queryOne } from '../../database/connection';
+import { parseJsonField } from '../../utils/api-response';
 import {
   getProbabilities,
   pickWeightedOutcome,
@@ -122,8 +123,8 @@ export async function mangoReveal(sessionId: number, row: number, col: number, p
 
   if (!session) throw new Error('Invalid session');
 
-  const pred: StoredSession = JSON.parse(session.predetermined_outcome as unknown as string);
-  const safePath: number[] = JSON.parse(session.board_data as unknown as string);
+  const pred: StoredSession = parseJsonField<StoredSession>(session.predetermined_outcome);
+  const safePath: number[] = parseJsonField<number[]>(session.board_data);
   const isMango = safePath[row] === col;
 
   if (!isMango) {

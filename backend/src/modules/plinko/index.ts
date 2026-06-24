@@ -1,4 +1,5 @@
 import { insert, query, queryOne } from '../../database/connection';
+import { parseJsonField } from '../../utils/api-response';
 import {
   getProbabilities,
   pickWeightedOutcome,
@@ -6,81 +7,94 @@ import {
   consumeForcedOutcome,
 } from '../probability-engine';
 import { incrementGamesPlayed, updateLeaderboardStats, logWinner } from '../reward-engine';
-import { PlinkoMultiplier, PlinkoForceOutcome } from '../../types';
+import { PlinkoForceOutcome } from '../../types';
 
 const GAME_ID = 1;
-const MULTIPLIERS: PlinkoMultiplier[] = [0, 0.5, 1, 2, 5, 10, 50];
 const BASE_BET = parseInt(process.env.BASE_BET || '100');
+const NUM_ROWS = 12;
+const NUM_SLOTS = 13;
 
-const FORCE_MAP: Record<PlinkoForceOutcome, PlinkoMultiplier[]> = {
-  LOSE: [0],
-  SMALL_WIN: [0.5, 1],
-  MEDIUM_WIN: [2, 5],
-  BIG_WIN: [10],
-  JACKPOT: [50],
+/** Symmetrical casino layout: 0|1|2|5|10|25|50|25|10|5|2|1|0 */
+export const SLOT_VALUES = [0, 1, 2, 5, 10, 25, 50, 25, 10, 5, 2, 1, 0] as const;
+export type PlinkoSlotMultiplier = (typeof SLOT_VALUES)[number];
+
+const FORCE_SLOTS: Record<PlinkoForceOutcome, number[]> = {
+  LOSE: [0, 12],
+  SMALL_WIN: [1, 11],
+  MEDIUM_WIN: [2, 3, 9, 10],
+  BIG_WIN: [4, 5, 7, 8],
+  JACKPOT: [6],
 };
 
-function multiplierToKey(m: PlinkoMultiplier): string {
-  return `multiplier_${m}`;
+interface PlinkoOutcome {
+  multiplier: number;
+  slotIndex: number;
+  path: ('L' | 'R')[];
+  visualSeed: number;
+  baseBet: number;
 }
 
-function pickMultiplierFromConfig(config: Record<string, number>): PlinkoMultiplier {
+function slotKey(index: number): string {
+  return `slot_${index}`;
+}
+
+function pickSlotFromConfig(config: Record<string, number>): number {
   const weights: Record<string, number> = {};
-  for (const m of MULTIPLIERS) {
-    weights[multiplierToKey(m)] = config[multiplierToKey(m)] || 0;
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    weights[slotKey(i)] = config[slotKey(i)] ?? defaultSlotProb(i);
   }
   const key = pickWeightedOutcome(weights);
-  return parseFloat(key.replace('multiplier_', '')) as PlinkoMultiplier;
+  return parseInt(key.replace('slot_', ''), 10);
 }
 
-function resolveForceOutcome(force: string): PlinkoMultiplier {
-  const options = FORCE_MAP[force as PlinkoForceOutcome];
-  if (!options) return pickMultiplierFromConfig({});
-  return options[Math.floor(Math.random() * options.length)];
+function defaultSlotProb(index: number): number {
+  const defaults = [8, 9, 9, 8, 7, 6, 3, 6, 7, 8, 9, 9, 8];
+  return defaults[index] ?? 7;
 }
 
-function generatePath(targetSlot: number, numRows = 12): ('L' | 'R')[] {
-  const path: ('L' | 'R')[] = [];
-  let position = Math.floor(MULTIPLIERS.length / 2);
-  const slots = MULTIPLIERS.length;
+function resolveForceSlot(force: string): number {
+  const slots = FORCE_SLOTS[force as PlinkoForceOutcome];
+  if (!slots?.length) return pickSlotFromConfig({});
+  return slots[Math.floor(Math.random() * slots.length)];
+}
 
-  for (let row = 0; row < numRows; row++) {
-    const remaining = numRows - row - 1;
-    const needRight = targetSlot - position;
-    if (needRight > remaining) {
-      path.push('R');
-      position++;
-    } else if (needRight < 0) {
-      path.push('L');
-      position--;
-    } else {
-      const dir = Math.random() > 0.5 ? 'R' : 'L';
-      path.push(dir);
-      position += dir === 'R' ? 1 : -1;
-    }
-    position = Math.max(0, Math.min(slots - 1, position));
+/** Exactly `targetSlot` right-deflections shuffled for natural L/R sequence. */
+export function generatePath(targetSlot: number): ('L' | 'R')[] {
+  const rights = Math.max(0, Math.min(NUM_ROWS, targetSlot));
+  const moves: ('L' | 'R')[] = [
+    ...Array(rights).fill('R' as const),
+    ...Array(NUM_ROWS - rights).fill('L' as const),
+  ];
+  for (let i = moves.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [moves[i], moves[j]] = [moves[j], moves[i]];
   }
-  return path;
+  return moves;
+}
+
+export function planPlinkoDrop(targetSlot: number): { path: ('L' | 'R')[]; targetSlot: number } {
+  return { path: generatePath(targetSlot), targetSlot };
 }
 
 export async function startPlinkoGame(playerId: number, playerName: string) {
   await incrementGamesPlayed();
 
   const forced = await getPendingForcedOutcome(GAME_ID);
-  let multiplier: PlinkoMultiplier;
+  let slotIndex: number;
   let forcedOutcome: string | null = null;
 
   if (forced) {
-    multiplier = resolveForceOutcome(forced);
+    slotIndex = resolveForceSlot(forced);
     forcedOutcome = forced;
     await consumeForcedOutcome(GAME_ID, forced);
   } else {
     const config = await getProbabilities(GAME_ID);
-    multiplier = pickMultiplierFromConfig(config);
+    slotIndex = pickSlotFromConfig(config);
   }
 
-  const slotIndex = MULTIPLIERS.indexOf(multiplier);
-  const path = generatePath(slotIndex);
+  const multiplier = SLOT_VALUES[slotIndex];
+  const { path } = planPlinkoDrop(slotIndex);
+  const visualSeed = Math.floor(Math.random() * 2147483647);
   const reward = BASE_BET * multiplier;
 
   const sessionId = await insert(
@@ -90,7 +104,7 @@ export async function startPlinkoGame(playerId: number, playerName: string) {
       playerId,
       GAME_ID,
       forcedOutcome,
-      JSON.stringify({ multiplier, slotIndex, path, baseBet: BASE_BET }),
+      JSON.stringify({ multiplier, slotIndex, path, visualSeed, baseBet: BASE_BET }),
       Math.round(reward),
       reward,
     ]
@@ -101,6 +115,7 @@ export async function startPlinkoGame(playerId: number, playerName: string) {
     multiplier,
     slotIndex,
     path,
+    visualSeed,
     baseBet: BASE_BET,
     reward,
     playerName,
@@ -111,7 +126,7 @@ export async function finishPlinkoGame(sessionId: number, playerName: string) {
   const session = await queryOne<{
     id: number;
     player_id: number;
-    predetermined_outcome: string;
+    predetermined_outcome: unknown;
     reward_amount: number;
     status: string;
   }>('SELECT * FROM game_sessions WHERE id = ?', [sessionId]);
@@ -120,13 +135,14 @@ export async function finishPlinkoGame(sessionId: number, playerName: string) {
     throw new Error('Invalid session');
   }
 
-  const outcome = JSON.parse(session.predetermined_outcome as unknown as string);
+  const outcome = parseJsonField<PlinkoOutcome>(session.predetermined_outcome);
   const rewardAmount = Number(session.reward_amount);
-  const rewardDesc = outcome.multiplier === 0
-    ? 'No win'
-    : outcome.multiplier === 50
-    ? `JACKPOT! ${outcome.multiplier}x = ${rewardAmount} Rupees`
-    : `${outcome.multiplier}x = ${rewardAmount} Rupees`;
+  const rewardDesc =
+    outcome.multiplier === 0
+      ? 'No win'
+      : outcome.multiplier === 50
+      ? `JACKPOT! ${outcome.multiplier}x = ${rewardAmount} Rupees`
+      : `${outcome.multiplier}x = ${rewardAmount} Rupees`;
 
   await query(
     `UPDATE game_sessions SET status = 'completed', finished_at = NOW(),
@@ -148,11 +164,25 @@ export async function finishPlinkoGame(sessionId: number, playerName: string) {
     });
   }
 
-  return { rewardAmount, rewardDesc, multiplier: outcome.multiplier };
+  return { rewardAmount, rewardDesc, multiplier: outcome.multiplier, slotIndex: outcome.slotIndex };
 }
 
 export async function getPlinkoProbabilities() {
   return getProbabilities(GAME_ID);
 }
 
-export { GAME_ID as PLINKO_GAME_ID, MULTIPLIERS, BASE_BET };
+export function getDefaultSlotProbabilities(): Record<string, number> {
+  const config: Record<string, number> = {};
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    config[slotKey(i)] = defaultSlotProb(i);
+  }
+  return config;
+}
+
+export {
+  GAME_ID as PLINKO_GAME_ID,
+  SLOT_VALUES as MULTIPLIERS,
+  BASE_BET,
+  NUM_ROWS,
+  NUM_SLOTS,
+};

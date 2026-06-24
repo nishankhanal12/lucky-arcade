@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { adminLogin, getOverview, getSystemSettings, updateSystemSetting, getLiveSessions } from '../modules/admin';
 import {
   getProbabilities,
@@ -11,20 +11,20 @@ import { getRewards, createReward, updateReward, deleteReward } from '../modules
 import { getPlinkoProbabilities } from '../modules/plinko';
 import { saveCustomBoard, getCustomBoards, getCustomBoard, generateBoard } from '../modules/mango';
 import { getGameStats, getHourlyActivity, getDailyStats } from '../modules/analytics';
-import { getRecentWinners, getLeaderboard, getTopWinners } from '../modules/leaderboard';
-import { emitAdminChangedProbability, emitAdminForcedOutcome, emitLiveSessions } from '../modules/socket';
+import { getRecentWinners, getLeaderboard } from '../modules/leaderboard';
+import { emitAdminChangedProbability, emitAdminForcedOutcome } from '../modules/socket';
+import { sendSuccess, sendError } from '../utils/api-response';
 import { PLINKO_GAME_ID } from '../modules/plinko';
 import { MANGO_GAME_ID } from '../modules/mango';
 import { TAP_RUSH_GAME_ID } from '../modules/tap-rush';
 
 const router = Router();
-
 const adminSessions = new Set<string>();
 
-function requireAdmin(req: Request, res: Response, next: () => void) {
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const token = req.headers['x-admin-token'] as string;
   if (!token || !adminSessions.has(token)) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    return sendError(res, 'Unauthorized', 401);
   }
   next();
 }
@@ -33,30 +33,28 @@ router.post('/login', async (req: Request, res: Response) => {
   try {
     const { username, password } = req.body;
     const valid = await adminLogin(username, password);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!valid) return sendError(res, 'Invalid credentials', 401);
     const token = `admin_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     adminSessions.add(token);
-    res.json({ token, username });
+    sendSuccess(res, { token, username }, 'Login successful');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Login failed', 500, err);
   }
 });
 
 router.get('/overview', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const overview = await getOverview();
-    res.json(overview);
+    sendSuccess(res, await getOverview());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load overview', 500, err);
   }
 });
 
 router.get('/settings', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const settings = await getSystemSettings();
-    res.json(settings);
+    sendSuccess(res, await getSystemSettings());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load settings', 500, err);
   }
 });
 
@@ -64,19 +62,18 @@ router.put('/settings', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { key, value } = req.body;
     await updateSystemSetting(key, value);
-    res.json({ success: true });
+    sendSuccess(res, { key, value }, 'Setting updated');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to update setting', 500, err);
   }
 });
 
 router.get('/probabilities/:gameId', requireAdmin, async (req: Request, res: Response) => {
   try {
     const gameId = parseInt(req.params.gameId);
-    const config = await getProbabilities(gameId);
-    res.json(config);
+    sendSuccess(res, await getProbabilities(gameId));
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load probabilities', 500, err);
   }
 });
 
@@ -86,13 +83,13 @@ router.put('/probabilities/:gameId', requireAdmin, async (req: Request, res: Res
     const config = req.body.config as Record<string, number>;
     const keys = Object.keys(config);
     if (!validateProbabilitiesSum(config, keys)) {
-      return res.status(400).json({ error: 'Probabilities must sum to 100%' });
+      return sendError(res, 'Probabilities must sum to 100%', 400);
     }
     await updateProbabilities(gameId, config);
     emitAdminChangedProbability({ gameId, config });
-    res.json({ success: true, config });
+    sendSuccess(res, { config }, 'Probabilities updated');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to update probabilities', 500, err);
   }
 });
 
@@ -101,22 +98,21 @@ router.post('/plinko/rtp', requireAdmin, async (req: Request, res: Response) => 
     const { rtp } = req.body;
     const validRtp = [60, 70, 80, 90, 95];
     if (!validRtp.includes(rtp)) {
-      return res.status(400).json({ error: 'RTP must be 60, 70, 80, 90, or 95' });
+      return sendError(res, 'RTP must be 60, 70, 80, 90, or 95', 400);
     }
     const config = await adjustPlinkoRTP(PLINKO_GAME_ID, rtp);
     emitAdminChangedProbability({ gameId: PLINKO_GAME_ID, config });
-    res.json({ success: true, config, rtp });
+    sendSuccess(res, { config, rtp }, 'RTP updated');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to set RTP', 500, err);
   }
 });
 
 router.get('/plinko/probabilities', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const config = await getPlinkoProbabilities();
-    res.json(config);
+    sendSuccess(res, await getPlinkoProbabilities());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load Plinko probabilities', 500, err);
   }
 });
 
@@ -125,119 +121,110 @@ router.post('/force-outcome', requireAdmin, async (req: Request, res: Response) 
     const { gameId, outcome } = req.body;
     await queueForcedOutcome(gameId, outcome);
     emitAdminForcedOutcome({ gameId, outcome });
-    res.json({ success: true, gameId, outcome });
+    sendSuccess(res, { gameId, outcome }, 'Outcome queued');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to queue outcome', 500, err);
   }
 });
 
 router.get('/rewards', requireAdmin, async (req: Request, res: Response) => {
   try {
     const gameId = req.query.gameId ? parseInt(req.query.gameId as string) : undefined;
-    const rewards = await getRewards(gameId);
-    res.json(rewards);
+    sendSuccess(res, await getRewards(gameId));
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load rewards', 500, err);
   }
 });
 
 router.post('/rewards', requireAdmin, async (req: Request, res: Response) => {
   try {
     const id = await createReward(req.body);
-    res.json({ id, ...req.body });
+    sendSuccess(res, { id, ...req.body }, 'Reward created', 201);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to create reward', 500, err);
   }
 });
 
 router.put('/rewards/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     await updateReward(parseInt(req.params.id), req.body);
-    res.json({ success: true });
+    sendSuccess(res, { id: parseInt(req.params.id) }, 'Reward updated');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to update reward', 500, err);
   }
 });
 
 router.delete('/rewards/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
     await deleteReward(parseInt(req.params.id));
-    res.json({ success: true });
+    sendSuccess(res, {}, 'Reward deleted');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to delete reward', 500, err);
   }
 });
 
 router.get('/winners', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const winners = await getRecentWinners(50);
-    res.json(winners);
+    sendSuccess(res, await getRecentWinners(50));
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load winners', 500, err);
   }
 });
 
 router.get('/leaderboard', requireAdmin, async (req: Request, res: Response) => {
   try {
     const type = (req.query.type as 'winnings' | 'score' | 'games') || 'winnings';
-    const data = await getLeaderboard(type, 50);
-    res.json(data);
+    sendSuccess(res, await getLeaderboard(type, 50));
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load leaderboard', 500, err);
   }
 });
 
 router.get('/live-sessions', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const sessions = await getLiveSessions();
-    res.json(sessions);
+    sendSuccess(res, await getLiveSessions());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load live sessions', 500, err);
   }
 });
 
 router.get('/analytics/games', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const stats = await getGameStats();
-    res.json(stats);
+    sendSuccess(res, await getGameStats());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load game stats', 500, err);
   }
 });
 
 router.get('/analytics/hourly', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const stats = await getHourlyActivity();
-    res.json(stats);
+    sendSuccess(res, await getHourlyActivity());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load hourly activity', 500, err);
   }
 });
 
 router.get('/analytics/daily', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const stats = await getDailyStats();
-    res.json(stats);
+    sendSuccess(res, await getDailyStats());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load daily stats', 500, err);
   }
 });
 
 router.get('/boards', requireAdmin, async (_req: Request, res: Response) => {
   try {
-    const boards = await getCustomBoards();
-    res.json(boards);
+    sendSuccess(res, await getCustomBoards());
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load boards', 500, err);
   }
 });
 
 router.get('/boards/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const board = await getCustomBoard(parseInt(req.params.id));
-    res.json(board);
+    sendSuccess(res, await getCustomBoard(parseInt(req.params.id)));
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load board', 500, err);
   }
 });
 
@@ -245,9 +232,9 @@ router.post('/boards', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { name, board, difficulty } = req.body;
     const id = await saveCustomBoard(name, board, difficulty || 'custom');
-    res.json({ id, name });
+    sendSuccess(res, { id, name }, 'Board saved', 201);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to save board', 500, err);
   }
 });
 
@@ -255,9 +242,9 @@ router.post('/boards/generate', requireAdmin, async (req: Request, res: Response
   try {
     const { difficulty } = req.body;
     const board = await generateBoard(difficulty || 'medium');
-    res.json({ board });
+    sendSuccess(res, { board });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to generate board', 500, err);
   }
 });
 

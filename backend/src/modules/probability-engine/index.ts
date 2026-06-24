@@ -1,4 +1,9 @@
 import { query, queryOne } from '../../database/connection';
+import { getDefaultSlotProbabilities } from '../plinko';
+
+const PLINKO_GAME_ID = 1;
+const NUM_SLOTS = 13;
+const PLINKO_SLOT_VALUES = [0, 1, 2, 5, 10, 25, 50, 25, 10, 5, 2, 1, 0];
 
 export async function getProbabilities(gameId: number): Promise<Record<string, number>> {
   const rows = await query<{ config_key: string; config_value: number }[]>(
@@ -40,41 +45,46 @@ export function pickWeightedOutcome<T extends string>(
 }
 
 export async function adjustPlinkoRTP(gameId: number, targetRtp: number): Promise<Record<string, number>> {
-  const config = await getProbabilities(gameId);
-  const multipliers = ['multiplier_0', 'multiplier_0.5', 'multiplier_1', 'multiplier_2', 'multiplier_5', 'multiplier_10', 'multiplier_50'];
-  const values = [0, 0.5, 1, 2, 5, 10, 50];
+  let config = await getProbabilities(gameId);
+
+  const hasSlotKeys = Object.keys(config).some(k => k.startsWith('slot_'));
+  if (!hasSlotKeys) {
+    config = getDefaultSlotProbabilities();
+  }
 
   let currentRtp = 0;
-  let totalProb = 0;
-  for (let i = 0; i < multipliers.length; i++) {
-    const prob = config[multipliers[i]] || 0;
-    currentRtp += (values[i] * prob) / 100;
-    totalProb += prob;
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    const key = `slot_${i}`;
+    const prob = config[key] ?? 0;
+    currentRtp += (PLINKO_SLOT_VALUES[i] * prob) / 100;
   }
 
   const rtpRatio = targetRtp / Math.max(currentRtp, 0.01);
-
   const newConfig: Record<string, number> = {};
-  for (let i = 0; i < multipliers.length; i++) {
-    if (values[i] === 0) {
-      newConfig[multipliers[i]] = config[multipliers[i]] || 0;
+
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    const key = `slot_${i}`;
+    const val = PLINKO_SLOT_VALUES[i];
+    if (val === 0) {
+      newConfig[key] = config[key] ?? 0;
     } else {
-      newConfig[multipliers[i]] = (config[multipliers[i]] || 0) * rtpRatio;
+      newConfig[key] = (config[key] ?? 0) * rtpRatio;
     }
   }
 
   const newTotal = Object.values(newConfig).reduce((s, v) => s + v, 0);
-  for (const key of multipliers) {
+  for (let i = 0; i < NUM_SLOTS; i++) {
+    const key = `slot_${i}`;
     newConfig[key] = Math.round((newConfig[key] / newTotal) * 10000) / 100;
   }
 
   const adjustedTotal = Object.values(newConfig).reduce((s, v) => s + v, 0);
   const diff = 100 - adjustedTotal;
   if (diff !== 0) {
-    newConfig['multiplier_1'] = (newConfig['multiplier_1'] || 0) + diff;
+    newConfig['slot_6'] = (newConfig['slot_6'] || 0) + diff;
   }
 
-  await updateProbabilities(gameId, newConfig);
+  await updateProbabilities(PLINKO_GAME_ID, newConfig);
   await query(
     `INSERT INTO system_settings (setting_key, setting_value) VALUES ('plinko_rtp', ?)
      ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)`,

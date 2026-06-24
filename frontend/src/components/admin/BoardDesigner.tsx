@@ -23,7 +23,7 @@ export default function BoardDesigner() {
 
   const generateBoard = async (difficulty: string) => {
     const data = await adminApi.generateBoard(difficulty);
-    setBoard(data.board);
+    setBoard(data.board as CellType[][]);
   };
 
   const saveBoard = async () => {

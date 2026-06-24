@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { insert, query, queryOne } from '../database/connection';
+import { sendSuccess, sendError } from '../utils/api-response';
 import { getRecentWinners, getLeaderboard, getTopWinners } from '../modules/leaderboard';
 import { getSystemSettings } from '../modules/admin';
 import { startPlinkoGame, finishPlinkoGame } from '../modules/plinko';
@@ -32,7 +33,7 @@ router.get('/home', async (_req: Request, res: Response) => {
     const leaderboard = await getTopWinners(5);
     const games = await query('SELECT * FROM games WHERE is_active = TRUE');
 
-    res.json({
+    sendSuccess(res, {
       eventTitle: settings.event_title || 'Lucky Arcade',
       currentJackpot: Number(settings.current_jackpot || 50000),
       gamesPlayedToday: Number(overview?.total || 0),
@@ -41,28 +42,28 @@ router.get('/home', async (_req: Request, res: Response) => {
       games,
     });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load home data', 500, err);
   }
 });
 
 router.post('/player/join', async (req: Request, res: Response) => {
   try {
     const { displayName } = req.body;
-    if (!displayName?.trim()) return res.status(400).json({ error: 'Display name required' });
+    if (!displayName?.trim()) return sendError(res, 'Display name required', 400);
     const player = await getOrCreatePlayer(displayName.trim());
     await emitPlayerJoined(displayName.trim());
-    res.json({ playerId: player.id, displayName: displayName.trim() });
+    sendSuccess(res, { playerId: player.id, displayName: displayName.trim() }, 'Player joined');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to join', 500, err);
   }
 });
 
 router.get('/games', async (_req: Request, res: Response) => {
   try {
     const games = await query('SELECT * FROM games WHERE is_active = TRUE');
-    res.json(games);
+    sendSuccess(res, games);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load games', 500, err);
   }
 });
 
@@ -71,9 +72,9 @@ router.post('/plinko/start', async (req: Request, res: Response) => {
     const { playerId, playerName } = req.body;
     const result = await startPlinkoGame(playerId, playerName);
     emitGameStarted({ sessionId: result.sessionId, playerName, gameSlug: 'plinko', gameName: 'Plinko Drop' });
-    res.json(result);
+    sendSuccess(res, result, 'Plinko game started');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to start Plinko', 500, err);
   }
 });
 
@@ -94,9 +95,9 @@ router.post('/plinko/finish', async (req: Request, res: Response) => {
         emitJackpotWon({ playerName, amount: result.rewardAmount, game: 'Plinko Drop' });
       }
     }
-    res.json(result);
+    sendSuccess(res, result, 'Plinko game finished');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to finish Plinko', 500, err);
   }
 });
 
@@ -105,9 +106,9 @@ router.post('/mango/start', async (req: Request, res: Response) => {
     const { playerId, playerName, customBoardId } = req.body;
     const result = await startMangoGame(playerId, playerName, customBoardId);
     emitGameStarted({ sessionId: result.sessionId, playerName, gameSlug: 'mango-quest', gameName: 'Mango Quest' });
-    res.json(result);
+    sendSuccess(res, result, 'Mango Quest started');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to start Mango Quest', 500, err);
   }
 });
 
@@ -126,9 +127,9 @@ router.post('/mango/reveal', async (req: Request, res: Response) => {
         });
       }
     }
-    res.json(result);
+    sendSuccess(res, result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to reveal cell', 500, err);
   }
 });
 
@@ -137,9 +138,9 @@ router.post('/tap-rush/start', async (req: Request, res: Response) => {
     const { playerId, playerName } = req.body;
     const result = await startTapRushGame(playerId, playerName);
     emitGameStarted({ sessionId: result.sessionId, playerName, gameSlug: 'green-tap-rush', gameName: 'Green Tap Rush' });
-    res.json(result);
+    sendSuccess(res, result, 'Tap Rush started');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to start Tap Rush', 500, err);
   }
 });
 
@@ -147,9 +148,9 @@ router.post('/tap-rush/tap', async (req: Request, res: Response) => {
   try {
     const { sessionId, taps, playerName } = req.body;
     const result = await tapRushScore(sessionId, taps, playerName);
-    res.json(result);
+    sendSuccess(res, result);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to record tap', 500, err);
   }
 });
 
@@ -166,9 +167,9 @@ router.post('/tap-rush/finish', async (req: Request, res: Response) => {
         amount: result.rewardAmount,
       });
     }
-    res.json(result);
+    sendSuccess(res, result, 'Tap Rush finished');
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to finish Tap Rush', 500, err);
   }
 });
 
@@ -176,9 +177,9 @@ router.get('/leaderboard', async (req: Request, res: Response) => {
   try {
     const type = (req.query.type as 'winnings' | 'score' | 'games') || 'winnings';
     const data = await getLeaderboard(type, 50);
-    res.json(data);
+    sendSuccess(res, data);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load leaderboard', 500, err);
   }
 });
 
@@ -186,9 +187,9 @@ router.get('/winners', async (req: Request, res: Response) => {
   try {
     const limit = parseInt(req.query.limit as string) || 50;
     const data = await getRecentWinners(limit);
-    res.json(data);
+    sendSuccess(res, data);
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    sendError(res, 'Failed to load winners', 500, err);
   }
 });
 

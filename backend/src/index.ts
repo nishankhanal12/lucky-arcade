@@ -6,6 +6,7 @@ import gameRoutes from './routes/game.routes';
 import adminRoutes from './routes/admin.routes';
 import { initSocket } from './modules/socket';
 import { seedAdmin } from './database/seed';
+import { sendSuccess } from './utils/api-response';
 
 dotenv.config();
 
@@ -17,7 +18,7 @@ app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'Lucky Arcade API' });
+  sendSuccess(res, { status: 'ok', service: 'Lucky Arcade API' });
 });
 
 app.use('/api', gameRoutes);

@@ -1,8 +1,36 @@
-import axios from 'axios';
+import axios, { AxiosResponse } from 'axios';
+import {
+  HomeData,
+  PlinkoStartResult,
+  MangoStartResult,
+  TapRushStartResult,
+  WinnerLog,
+  LeaderboardEntry,
+  AnalyticsOverview,
+  Reward,
+  LiveSession,
+  Game,
+  Player,
+} from '../types';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const api = axios.create({ baseURL: API_BASE });
+
+interface ApiBody<T = unknown> {
+  success?: boolean;
+  data?: T;
+  message?: string;
+}
+
+/** Unwrap standardized `{ success, data }` responses; pass through legacy shapes. */
+export function unwrap<T>(response: AxiosResponse): T {
+  const body = response.data as ApiBody<T> | T;
+  if (body && typeof body === 'object' && 'success' in body && (body as ApiBody<T>).success === true) {
+    return (body as ApiBody<T>).data as T;
+  }
+  return body as T;
+}
 
 export function setAdminToken(token: string | null) {
   if (token) {
@@ -12,61 +40,74 @@ export function setAdminToken(token: string | null) {
   }
 }
 
+const get = <T>(url: string, params?: object) => api.get(url, { params }).then(r => unwrap<T>(r));
+const post = <T>(url: string, data?: object) => api.post(url, data).then(r => unwrap<T>(r));
+const put = <T>(url: string, data?: object) => api.put(url, data).then(r => unwrap<T>(r));
+const del = <T>(url: string) => api.delete(url).then(r => unwrap<T>(r));
+
 export const gameApi = {
-  getHome: () => api.get('/home').then(r => r.data),
-  joinPlayer: (displayName: string) => api.post('/player/join', { displayName }).then(r => r.data),
-  getGames: () => api.get('/games').then(r => r.data),
-  getLeaderboard: (type = 'winnings') => api.get(`/leaderboard?type=${type}`).then(r => r.data),
-  getWinners: (limit = 50) => api.get(`/winners?limit=${limit}`).then(r => r.data),
+  getHome: () => get<HomeData>('/home'),
+  joinPlayer: (displayName: string) => post<Player>('/player/join', { displayName }),
+  getGames: () => get<Game[]>('/games'),
+  getLeaderboard: (type = 'winnings') => get<LeaderboardEntry[]>(`/leaderboard?type=${type}`),
+  getWinners: (limit = 50) => get<WinnerLog[]>(`/winners?limit=${limit}`),
 
   plinkoStart: (playerId: number, playerName: string) =>
-    api.post('/plinko/start', { playerId, playerName }).then(r => r.data),
+    post<PlinkoStartResult>('/plinko/start', { playerId, playerName }),
   plinkoFinish: (sessionId: number, playerName: string) =>
-    api.post('/plinko/finish', { sessionId, playerName }).then(r => r.data),
+    post<{ rewardAmount: number; rewardDesc: string; multiplier: number }>('/plinko/finish', { sessionId, playerName }),
 
   mangoStart: (playerId: number, playerName: string) =>
-    api.post('/mango/start', { playerId, playerName }).then(r => r.data),
+    post<MangoStartResult>('/mango/start', { playerId, playerName }),
   mangoReveal: (sessionId: number, row: number, col: number, playerName: string) =>
-    api.post('/mango/reveal', { sessionId, row, col, playerName }).then(r => r.data),
+    post<{
+      cell: string;
+      gameOver: boolean;
+      row: number;
+      reward: Reward | null;
+      rewardAmount: number;
+      rewardDesc: string;
+      currentRow?: number;
+    }>('/mango/reveal', { sessionId, row, col, playerName }),
 
   tapRushStart: (playerId: number, playerName: string) =>
-    api.post('/tap-rush/start', { playerId, playerName }).then(r => r.data),
+    post<TapRushStartResult>('/tap-rush/start', { playerId, playerName }),
   tapRushTap: (sessionId: number, taps: number, playerName: string) =>
-    api.post('/tap-rush/tap', { sessionId, taps, playerName }).then(r => r.data),
+    post<{ taps: number; targetTaps: number }>('/tap-rush/tap', { sessionId, taps, playerName }),
   tapRushFinish: (sessionId: number, taps: number, playerName: string) =>
-    api.post('/tap-rush/finish', { sessionId, taps, playerName }).then(r => r.data),
+    post<{ taps: number; rewardDesc: string; rewardAmount: number }>('/tap-rush/finish', { sessionId, taps, playerName }),
 };
 
 export const adminApi = {
   login: (username: string, password: string) =>
-    api.post('/admin/login', { username, password }).then(r => r.data),
-  getOverview: () => api.get('/admin/overview').then(r => r.data),
-  getSettings: () => api.get('/admin/settings').then(r => r.data),
+    post<{ token: string; username: string }>('/admin/login', { username, password }),
+  getOverview: () => get<AnalyticsOverview>('/admin/overview'),
+  getSettings: () => get<Record<string, string>>('/admin/settings'),
   updateSetting: (key: string, value: string) =>
-    api.put('/admin/settings', { key, value }).then(r => r.data),
+    put<{ key: string; value: string }>('/admin/settings', { key, value }),
   getProbabilities: (gameId: number) =>
-    api.get(`/admin/probabilities/${gameId}`).then(r => r.data),
+    get<Record<string, number>>(`/admin/probabilities/${gameId}`),
   updateProbabilities: (gameId: number, config: Record<string, number>) =>
-    api.put(`/admin/probabilities/${gameId}`, { config }).then(r => r.data),
+    put<{ config: Record<string, number> }>(`/admin/probabilities/${gameId}`, { config }),
   setPlinkoRtp: (rtp: number) =>
-    api.post('/admin/plinko/rtp', { rtp }).then(r => r.data),
+    post<{ config: Record<string, number>; rtp: number }>('/admin/plinko/rtp', { rtp }),
   forceOutcome: (gameId: number, outcome: string) =>
-    api.post('/admin/force-outcome', { gameId, outcome }).then(r => r.data),
+    post<{ gameId: number; outcome: string }>('/admin/force-outcome', { gameId, outcome }),
   getRewards: (gameId?: number) =>
-    api.get('/admin/rewards', { params: gameId ? { gameId } : {} }).then(r => r.data),
-  createReward: (data: object) => api.post('/admin/rewards', data).then(r => r.data),
-  updateReward: (id: number, data: object) => api.put(`/admin/rewards/${id}`, data).then(r => r.data),
-  deleteReward: (id: number) => api.delete(`/admin/rewards/${id}`).then(r => r.data),
-  getWinners: () => api.get('/admin/winners').then(r => r.data),
-  getLeaderboard: (type = 'winnings') => api.get(`/admin/leaderboard?type=${type}`).then(r => r.data),
-  getLiveSessions: () => api.get('/admin/live-sessions').then(r => r.data),
-  getGameStats: () => api.get('/admin/analytics/games').then(r => r.data),
-  getHourlyActivity: () => api.get('/admin/analytics/hourly').then(r => r.data),
+    get<Reward[]>('/admin/rewards', gameId ? { gameId } : undefined),
+  createReward: (data: object) => post<Reward>('/admin/rewards', data),
+  updateReward: (id: number, data: object) => put<{ id: number }>(`/admin/rewards/${id}`, data),
+  deleteReward: (id: number) => del<Record<string, never>>(`/admin/rewards/${id}`),
+  getWinners: () => get<WinnerLog[]>('/admin/winners'),
+  getLeaderboard: (type = 'winnings') => get<LeaderboardEntry[]>(`/admin/leaderboard?type=${type}`),
+  getLiveSessions: () => get<LiveSession[]>('/admin/live-sessions'),
+  getGameStats: () => get<Array<{ name: string; slug: string; sessions: number; wins: number; total_payouts: number; avg_score: number }>>('/admin/analytics/games'),
+  getHourlyActivity: () => get<Array<{ hour: number; count: number }>>('/admin/analytics/hourly'),
   generateBoard: (difficulty: string) =>
-    api.post('/admin/boards/generate', { difficulty }).then(r => r.data),
+    post<{ board: string[][] }>('/admin/boards/generate', { difficulty }),
   saveBoard: (name: string, board: string[][], difficulty: string) =>
-    api.post('/admin/boards', { name, board, difficulty }).then(r => r.data),
-  getBoards: () => api.get('/admin/boards').then(r => r.data),
+    post<{ id: number; name: string }>('/admin/boards', { name, board, difficulty }),
+  getBoards: () => get<Array<{ id: number; name: string; difficulty: string; created_at: string }>>('/admin/boards'),
 };
 
 export default api;

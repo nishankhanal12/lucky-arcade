@@ -42,6 +42,7 @@ export interface PlinkoStartResult {
   multiplier: number;
   slotIndex: number;
   path: ('L' | 'R')[];
+  visualSeed: number;
   baseBet: number;
   reward: number;
 }

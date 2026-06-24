@@ -61,7 +61,7 @@ export interface Reward {
   description: string;
 }
 
-export type PlinkoMultiplier = 0 | 0.5 | 1 | 2 | 5 | 10 | 50;
+export type PlinkoMultiplier = 0 | 1 | 2 | 5 | 10 | 25 | 50;
 export type PlinkoForceOutcome = 'LOSE' | 'SMALL_WIN' | 'MEDIUM_WIN' | 'BIG_WIN' | 'JACKPOT';
 export type MangoOutcome = 'LOSE_BEFORE_5' | 'REACH_5' | 'REACH_7' | 'REACH_10';
 export type TapRushOutcome = 'FAIL' | 'REACH_10' | 'REACH_20' | 'REACH_30' | 'REACH_40';

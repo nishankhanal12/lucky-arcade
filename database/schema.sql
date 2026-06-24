@@ -88,7 +88,7 @@ CREATE TABLE probability_configs (
   id INT PRIMARY KEY AUTO_INCREMENT,
   game_id INT NOT NULL,
   config_key VARCHAR(100) NOT NULL,
-  config_value DECIMAL(7,4) NOT NULL,
+  config_value DECIMAL(10,4) NOT NULL,
   FOREIGN KEY (game_id) REFERENCES games(id),
   UNIQUE KEY unique_game_key (game_id, config_key)
 );
@@ -137,15 +137,21 @@ INSERT INTO system_settings (setting_key, setting_value) VALUES
 ('ticket_price', '50'),
 ('plinko_rtp', '80');
 
--- Plinko probabilities (game_id = 1)
+-- Plinko slot probabilities (game_id = 1) — 13 symmetrical slots
 INSERT INTO probability_configs (game_id, config_key, config_value) VALUES
-(1, 'multiplier_0', 15.0000),
-(1, 'multiplier_0.5', 20.0000),
-(1, 'multiplier_1', 25.0000),
-(1, 'multiplier_2', 18.0000),
-(1, 'multiplier_5', 12.0000),
-(1, 'multiplier_10', 7.0000),
-(1, 'multiplier_50', 3.0000);
+(1, 'slot_0', 8.0000),
+(1, 'slot_1', 9.0000),
+(1, 'slot_2', 9.0000),
+(1, 'slot_3', 8.0000),
+(1, 'slot_4', 7.0000),
+(1, 'slot_5', 6.0000),
+(1, 'slot_6', 3.0000),
+(1, 'slot_7', 6.0000),
+(1, 'slot_8', 7.0000),
+(1, 'slot_9', 8.0000),
+(1, 'slot_10', 9.0000),
+(1, 'slot_11', 9.0000),
+(1, 'slot_12', 8.0000);
 
 -- Mango Quest outcomes (game_id = 2)
 INSERT INTO probability_configs (game_id, config_key, config_value) VALUES

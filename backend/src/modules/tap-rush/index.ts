@@ -1,4 +1,5 @@
 import { insert, query, queryOne } from '../../database/connection';
+import { parseJsonField } from '../../utils/api-response';
 import {
   getProbabilities,
   pickWeightedOutcome,
@@ -102,7 +103,7 @@ export async function tapRushScore(sessionId: number, taps: number, playerName: 
 
   if (!session || session.status !== 'active') throw new Error('Invalid session');
 
-  const pred = JSON.parse(session.predetermined_outcome as unknown as string);
+  const pred = parseJsonField<Record<string, unknown>>(session.predetermined_outcome);
   pred.taps = taps;
 
   await query(
@@ -110,7 +111,7 @@ export async function tapRushScore(sessionId: number, taps: number, playerName: 
     [JSON.stringify(pred), taps, sessionId]
   );
 
-  return { taps, targetTaps: pred.targetTaps };
+  return { taps, targetTaps: pred.targetTaps as number };
 }
 
 export async function finishTapRushGame(sessionId: number, taps: number, playerName: string) {
@@ -123,7 +124,11 @@ export async function finishTapRushGame(sessionId: number, taps: number, playerN
 
   if (!session) throw new Error('Invalid session');
 
-  const pred = JSON.parse(session.predetermined_outcome as unknown as string);
+  const pred = parseJsonField<{
+    outcome: TapRushOutcome;
+    targetTaps: number;
+    taps?: number;
+  }>(session.predetermined_outcome);
   const outcome = pred.outcome as TapRushOutcome;
   const target = OUTCOME_TARGETS[outcome];
 

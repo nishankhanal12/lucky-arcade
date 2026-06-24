@@ -30,7 +30,8 @@ const SECTIONS: { key: Section; label: string; icon: string }[] = [
   { key: 'leaderboard', label: 'Leaderboard', icon: '🥇' },
 ];
 
-const PLINKO_KEYS = ['multiplier_0', 'multiplier_0.5', 'multiplier_1', 'multiplier_2', 'multiplier_5', 'multiplier_10', 'multiplier_50'];
+const PLINKO_SLOT_LABELS = ['0x', '1x', '2x', '5x', '10x', '25x', '50x', '25x', '10x', '5x', '2x', '1x', '0x'];
+const PLINKO_KEYS = PLINKO_SLOT_LABELS.map((_, i) => `slot_${i}`);
 const MANGO_KEYS = ['LOSE_BEFORE_5', 'REACH_5', 'REACH_7', 'REACH_10'];
 const TAP_KEYS = ['FAIL', 'REACH_10', 'REACH_20', 'REACH_30', 'REACH_40'];
 
@@ -104,7 +105,7 @@ export default function AdminDashboard() {
 
   const handleRtpChange = async (rtp: number) => {
     const config = await adminApi.setPlinkoRtp(rtp);
-    setPlinkoProb(config);
+    setPlinkoProb(config.config);
   };
 
   return (
@@ -238,11 +239,11 @@ export default function AdminDashboard() {
                 ))}
               </div>
               <ProbabilityEditor
-                title="Plinko Multipliers"
+                title="Plinko Slot Probabilities"
                 gameId={1}
                 config={plinkoProb}
                 keys={PLINKO_KEYS}
-                labels={['0x', '0.5x', '1x', '2x', '5x', '10x', '50x']}
+                labels={PLINKO_SLOT_LABELS}
                 onUpdate={setPlinkoProb}
               />
             </div>

@@ -1,16 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { usePlayer } from '../context/PlayerContext';
 import { gameApi } from '../services/api';
 import { PlinkoStartResult } from '../types';
 import NameModal from '../components/ui/NameModal';
-
-const MULTIPLIERS = [0, 0.5, 1, 2, 5, 10, 50];
-const SLOT_COLORS = [
-  'bg-red-600', 'bg-orange-500', 'bg-yellow-500', 'bg-green-500',
-  'bg-blue-500', 'bg-purple-500', 'bg-pink-500',
-];
+import { PlinkoCanvasEngine, PLINKO } from '../components/games/plinkoEngine';
 
 export default function Plinko() {
   const { player, setPlayerName } = usePlayer();
@@ -18,51 +13,34 @@ export default function Plinko() {
   const [gameState, setGameState] = useState<'idle' | 'dropping' | 'done'>('idle');
   const [gameData, setGameData] = useState<PlinkoStartResult | null>(null);
   const [result, setResult] = useState<{ rewardAmount: number; rewardDesc: string; multiplier: number } | null>(null);
-  const [ballPos, setBallPos] = useState({ x: 50, y: 5 });
   const [showReward, setShowReward] = useState(false);
-  const animRef = useRef<number>();
 
-  const startGame = useCallback(async () => {
-    if (!player) return;
-    setGameState('idle');
-    setResult(null);
-    setShowReward(false);
-    const data = await gameApi.plinkoStart(player.playerId, player.displayName);
-    setGameData(data);
-    setGameState('dropping');
-    animateBall(data);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const engineRef = useRef<PlinkoCanvasEngine | null>(null);
+  const playerRef = useRef(player);
+
+  useEffect(() => {
+    playerRef.current = player;
   }, [player]);
 
-  const animateBall = (data: PlinkoStartResult) => {
-    const path = data.path;
-    const numRows = path.length;
-    let row = 0;
-    let xPos = 50;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-    const step = () => {
-      if (row >= numRows) {
-        const slotX = 10 + (data.slotIndex / (MULTIPLIERS.length - 1)) * 80;
-        setBallPos({ x: slotX, y: 92 });
-        setTimeout(async () => {
-          const res = await gameApi.plinkoFinish(data.sessionId, player!.displayName);
-          setResult(res);
-          setGameState('done');
-          setShowReward(true);
-          playSound(res.multiplier >= 10 ? 'jackpot' : res.multiplier > 0 ? 'win' : 'lose');
-        }, 500);
-        return;
-      }
+    const engine = new PlinkoCanvasEngine(canvas);
+    engineRef.current = engine;
 
-      const dir = path[row];
-      xPos += dir === 'R' ? (80 / numRows) * 0.4 : -(80 / numRows) * 0.4;
-      xPos = Math.max(15, Math.min(85, xPos));
-      const yPos = 10 + (row / numRows) * 75;
-      setBallPos({ x: xPos, y: yPos });
-      row++;
-      animRef.current = window.setTimeout(step, 120);
+    const resize = () => engine.resize();
+    resize();
+    engine.drawIdle();
+
+    window.addEventListener('resize', resize);
+    return () => {
+      window.removeEventListener('resize', resize);
+      engine.destroy();
+      engineRef.current = null;
     };
-    step();
-  };
+  }, []);
 
   const playSound = (type: string) => {
     try {
@@ -72,105 +50,109 @@ export default function Plinko() {
       osc.connect(gain);
       gain.connect(ctx.destination);
       if (type === 'jackpot') {
-        osc.frequency.setValueAtTime(880, ctx.currentTime);
-        osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.1);
-        osc.frequency.setValueAtTime(1320, ctx.currentTime + 0.2);
+        [880, 1100, 1320].forEach((f, i) => osc.frequency.setValueAtTime(f, ctx.currentTime + i * 0.1));
       } else if (type === 'win') {
         osc.frequency.setValueAtTime(523, ctx.currentTime);
         osc.frequency.setValueAtTime(659, ctx.currentTime + 0.1);
       } else {
         osc.frequency.setValueAtTime(200, ctx.currentTime);
       }
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+      gain.gain.setValueAtTime(0.22, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.55);
       osc.start();
-      osc.stop(ctx.currentTime + 0.5);
-    } catch { /* audio not available */ }
+      osc.stop(ctx.currentTime + 0.55);
+    } catch {
+      /* audio unavailable */
+    }
   };
 
-  useEffect(() => () => { if (animRef.current) clearTimeout(animRef.current); }, []);
+  const startGame = useCallback(async () => {
+    const p = playerRef.current;
+    const engine = engineRef.current;
+    if (!p || !engine) return;
+
+    setResult(null);
+    setShowReward(false);
+    setGameState('dropping');
+
+    const data = await gameApi.plinkoStart(p.playerId, p.displayName);
+    setGameData(data);
+    engine.setHighlight(null);
+
+    engine.startDrop(data.path, data.slotIndex, data.visualSeed, async () => {
+      engine.setHighlight(data.slotIndex);
+
+      const res = await gameApi.plinkoFinish(data.sessionId, p.displayName);
+      setResult(res);
+      setGameState('done');
+      setShowReward(true);
+      playSound(res.multiplier >= 25 ? 'jackpot' : res.multiplier > 0 ? 'win' : 'lose');
+    });
+  }, []);
 
   if (showName) {
     return (
       <NameModal
-        onSubmit={async (name) => { await setPlayerName(name); setShowName(false); }}
-        onClose={() => window.location.href = '/'}
+        onSubmit={async (name) => {
+          await setPlayerName(name);
+          setShowName(false);
+        }}
+        onClose={() => { window.location.href = '/'; }}
       />
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8">
-      <div className="text-center mb-8">
+    <div className="max-w-5xl mx-auto px-4 py-8">
+      <div className="text-center mb-6">
         <h2 className="font-display text-5xl text-arcade-gold gold-text">🎯 Plinko Drop</h2>
-        <p className="font-arcade text-gray-400 mt-2">Drop the ball and win big!</p>
+        <p className="font-arcade text-gray-400 mt-2">Watch it flow — high risk at the edges, jackpot in the center</p>
       </div>
 
-      <div className="arcade-card relative overflow-hidden" style={{ minHeight: 500 }}>
-        {/* Peg board */}
-        <div className="relative w-full h-[450px]">
-          {Array.from({ length: 10 }).map((_, row) =>
-            Array.from({ length: row + 3 }).map((_, col) => {
-              const x = 50 + (col - (row + 2) / 2) * 8;
-              const y = 12 + row * 7;
-              return (
-                <div
-                  key={`${row}-${col}`}
-                  className="absolute w-3 h-3 rounded-full bg-white/60 shadow-lg shadow-white/20"
-                  style={{ left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' }}
-                />
-              );
-            })
-          )}
+      <div
+        className="relative rounded-2xl overflow-hidden border border-purple-500/30 shadow-2xl shadow-purple-900/40"
+        style={{ boxShadow: '0 0 40px rgba(168,85,247,0.15), inset 0 1px 0 rgba(255,255,255,0.08)' }}
+      >
+        <canvas ref={canvasRef} className="block w-full" style={{ height: 520 }} />
 
-          {/* Ball */}
-          {(gameState === 'dropping' || gameState === 'done') && (
-            <motion.div
-              className="absolute w-6 h-6 rounded-full bg-gradient-to-br from-arcade-gold to-yellow-600 shadow-lg shadow-yellow-500/50 z-10"
-              style={{ left: `${ballPos.x}%`, top: `${ballPos.y}%`, transform: 'translate(-50%, -50%)' }}
-              animate={{ scale: gameState === 'done' ? [1, 1.3, 1] : 1 }}
-            />
-          )}
-
-          {/* Multiplier slots */}
-          <div className="absolute bottom-0 left-0 right-0 flex">
-            {MULTIPLIERS.map((m, i) => (
-              <div
-                key={m}
-                className={`flex-1 py-3 text-center font-arcade text-xs font-bold ${SLOT_COLORS[i]} ${
-                  gameState === 'done' && gameData?.slotIndex === i ? 'ring-2 ring-white scale-110' : ''
-                } transition-all`}
-              >
-                {m}x
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Floating reward */}
         <AnimatePresence>
           {showReward && result && (
             <motion.div
-              initial={{ opacity: 0, y: 0, scale: 0.5 }}
-              animate={{ opacity: 1, y: -60, scale: 1 }}
+              initial={{ opacity: 0, scale: 0.5, y: 30 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20"
+              transition={{ type: 'spring', stiffness: 280, damping: 20 }}
+              className="absolute inset-0 flex items-center justify-center pointer-events-none z-10"
             >
-              <div className={`font-display text-5xl ${result.multiplier >= 10 ? 'text-arcade-gold gold-text' : result.multiplier > 0 ? 'text-green-400' : 'text-red-400'}`}>
+              <div
+                className={`font-display text-3xl md:text-5xl px-8 py-4 rounded-2xl backdrop-blur-md ${
+                  result.multiplier >= 25
+                    ? 'text-arcade-gold gold-text bg-black/50 border-2 border-arcade-gold/60'
+                    : result.multiplier > 0
+                    ? 'text-green-300 bg-black/45 border border-green-400/40'
+                    : 'text-red-300 bg-black/45 border border-red-400/40'
+                }`}
+              >
                 {result.rewardDesc}
               </div>
-              {result.multiplier >= 10 && (
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
-                  className="text-6xl text-center mt-2"
-                >
-                  ✨🎉✨
-                </motion.div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>
+      </div>
+
+      <div className="flex flex-wrap justify-center gap-1 mt-3 px-2">
+        {PLINKO.SLOT_VALUES.map((m, i) => (
+          <span
+            key={i}
+            className={`font-arcade text-[10px] md:text-xs px-1 py-0.5 rounded ${
+              gameData?.slotIndex === i && gameState === 'done'
+                ? 'bg-arcade-gold text-black scale-110'
+                : 'text-gray-500'
+            }`}
+          >
+            {m}x
+          </span>
+        ))}
       </div>
 
       <div className="flex justify-center gap-4 mt-8">
@@ -179,7 +161,7 @@ export default function Plinko() {
             {gameState === 'done' ? 'Drop Again' : 'Drop Ball!'}
           </button>
         ) : (
-          <div className="font-arcade text-arcade-gold animate-pulse text-xl">Ball dropping...</div>
+          <div className="font-arcade text-arcade-gold animate-pulse text-xl">Ball in motion...</div>
         )}
         <Link to="/" className="arcade-btn bg-white/10 hover:bg-white/20">Back Home</Link>
       </div>
