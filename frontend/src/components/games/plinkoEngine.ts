@@ -47,15 +47,22 @@ const BOARD = {
   SPAWN_Y: 0.035,
 };
 
-const PHYSICS = {
-  GRAVITY: 0.00042,
-  DEFLECT_VAR: 0.0018,
-  BOUNCE_DAMP: 0.86,
-  FRICTION: 0.993,
-  MAX_VX: 0.018,
-  MIN_VY: 0.001,
-  DT: 0.014,
-  SAMPLE_MS: 8,
+const TIMING = {
+  /** Target ~7s peg-field fall + ~1s landing */
+  INITIAL_DROP: 420,
+  ROW_APPROACH: 185,
+  ROW_DEFLECT: 110,
+  ROW_EXIT: 210,
+  SLOT_DESCENT: 380,
+  LANDING: 1000,
+  SAMPLE_MS: 12,
+  TIMING_JITTER: 0.18,
+};
+
+const FLOW = {
+  /** Max lateral wobble — deviation within channel, not off-path */
+  WOBBLE: 0.006,
+  DEFLECT_BLEND: 0.38,
 };
 
 function slotToX(slot: number): number {
@@ -69,12 +76,6 @@ function rowY(row: number): number {
   return top + ((row + 0.5) / PLINKO.NUM_ROWS) * (bottom - top);
 }
 
-function pegFieldBounds(row: number): { min: number; max: number } {
-  const count = row + 3;
-  const half = ((count - 1) / 2) * PLINKO.PEG_SPACING;
-  const pad = PLINKO.PEG_SPACING * 0.35;
-  return { min: 0.5 - half - pad, max: 0.5 + half + pad };
-}
 
 function seededRandom(seed: number): () => number {
   let s = seed >>> 0;
@@ -116,9 +117,9 @@ export function generateLRPath(targetSlot: number): ('L' | 'R')[] {
 }
 
 /**
- * Simulate a marble falling through the peg field.
- * L/R path steers deflections at each row; gravity dominates motion.
- * Returns dense time-stamped samples for smooth playback.
+ * Build a slow, continuous flow path through peg channels.
+ * L/R path defines lane centers; small seeded wobble adds natural deviation.
+ * Destination is encoded in the path — not visibly pulled at runtime.
  */
 export function simulateTrajectory(
   path: ('L' | 'R')[],
@@ -126,181 +127,177 @@ export function simulateTrajectory(
   seed: number,
 ): TrajectorySample[] {
   const rand = seededRandom(seed);
-  const samples: TrajectorySample[] = [];
-
-  let x = BOARD.SPAWN_X;
-  let y = BOARD.SPAWN_Y;
-  let vx = 0;
-  let vy = PHYSICS.MIN_VY;
+  const keyframes: TrajectorySample[] = [];
+  let rights = 0;
   let t = 0;
-  let rowCrossed = -1;
 
-  const finalX = slotToX(targetSlot);
-  const slotStep = (slotToX(1) - slotToX(0));
+  const jitter = (base: number) => base * (1 + (rand() - 0.5) * TIMING.TIMING_JITTER);
 
-  const pushSample = () => {
-    samples.push({ x, y, t, vx, vy });
-  };
+  keyframes.push({ x: BOARD.SPAWN_X, y: BOARD.SPAWN_Y, t: 0, vx: 0, vy: 0.0004 });
 
-  pushSample();
+  t += jitter(TIMING.INITIAL_DROP);
+  keyframes.push({
+    x: BOARD.SPAWN_X + (rand() - 0.5) * 0.002,
+    y: rowY(0) - 0.034,
+    t,
+    vx: 0,
+    vy: 0.0006,
+  });
 
-  let nextSampleT = PHYSICS.SAMPLE_MS;
-  const maxSteps = 14000;
-  let steps = 0;
+  for (let row = 0; row < path.length; row++) {
+    const yRow = rowY(row);
+    const laneBefore = slotToX(rights);
+    const wobble = (rand() - 0.5) * FLOW.WOBBLE;
 
-  while (y < BOARD.SLOT_Y + 0.05 && steps < maxSteps) {
-    steps++;
-    const dt = PHYSICS.DT;
-    t += dt * 16.67;
+    if (path[row] === 'R') rights++;
+    const laneAfter = slotToX(rights);
 
-    vy += PHYSICS.GRAVITY;
-    vy = Math.max(vy, PHYSICS.MIN_VY);
+    const deflectX =
+      laneBefore +
+      (laneAfter - laneBefore) * (FLOW.DEFLECT_BLEND + rand() * 0.14) +
+      wobble * 0.5;
 
-    x += vx * dt;
-    y += vy * dt;
+    t += jitter(TIMING.ROW_APPROACH);
+    keyframes.push({
+      x: laneBefore + wobble,
+      y: yRow - 0.014,
+      t,
+      vx: (laneAfter - laneBefore) * 0.001,
+      vy: 0.00055,
+    });
 
-    const currentRow = Math.min(
-      PLINKO.NUM_ROWS - 1,
-      Math.floor(((y - BOARD.TOP) / (BOARD.PEG_BOTTOM - BOARD.TOP)) * PLINKO.NUM_ROWS),
-    );
+    t += jitter(TIMING.ROW_DEFLECT);
+    keyframes.push({
+      x: deflectX,
+      y: yRow + 0.003,
+      t,
+      vx: (laneAfter - laneBefore) * 0.002,
+      vy: 0.00035,
+    });
 
-    if (currentRow > rowCrossed && currentRow < PLINKO.NUM_ROWS) {
-      rowCrossed = currentRow;
-      const move = path[currentRow];
-      const variance = (rand() - 0.5) * PHYSICS.DEFLECT_VAR;
-      const peg = findNearestPeg(x, y, currentRow);
-
-      const deflect = slotStep * (0.42 + rand() * 0.08);
-      if (move === 'R') {
-        vx += deflect + variance;
-      } else {
-        vx -= deflect + variance;
-      }
-
-      if (peg) {
-        const away = x - peg.x;
-        vx += away * 0.06;
-        vy *= PHYSICS.BOUNCE_DAMP;
-      }
-
-      vy = Math.max(vy, PHYSICS.MIN_VY);
-    }
-
-    const bounds = pegFieldBounds(Math.max(0, Math.min(PLINKO.NUM_ROWS - 1, currentRow)));
-    const innerMin = bounds.min + PLINKO.PEG_SPACING * 0.22;
-    const innerMax = bounds.max - PLINKO.PEG_SPACING * 0.22;
-
-    if (x < innerMin) {
-      x = innerMin;
-      vx = Math.abs(vx) * 0.18;
-    } else if (x > innerMax) {
-      x = innerMax;
-      vx = -Math.abs(vx) * 0.18;
-    }
-
-    vx *= PHYSICS.FRICTION;
-    vx = Math.max(-PHYSICS.MAX_VX, Math.min(PHYSICS.MAX_VX, vx));
-
-    if (y > BOARD.PEG_BOTTOM + 0.02) {
-      const dropZone = (y - BOARD.PEG_BOTTOM) / (BOARD.SLOT_Y - BOARD.PEG_BOTTOM);
-      vy *= 1 - Math.min(0.015, dropZone * 0.012);
-    }
-
-    if (t >= nextSampleT) {
-      pushSample();
-      nextSampleT += PHYSICS.SAMPLE_MS;
-    }
+    t += jitter(TIMING.ROW_EXIT);
+    keyframes.push({
+      x: laneAfter + wobble * 0.3,
+      y: yRow + 0.026,
+      t,
+      vx: (laneAfter - laneBefore) * 0.0008,
+      vy: 0.00065,
+    });
   }
 
-  const landingSamples = buildLandingPhase(
-    samples[samples.length - 1],
-    finalX,
-  );
-  for (const s of landingSamples) {
-    samples.push(s);
+  const finalX = slotToX(targetSlot);
+
+  t += jitter(TIMING.SLOT_DESCENT);
+  keyframes.push({
+    x: finalX + (rand() - 0.5) * 0.005,
+    y: 0.79,
+    t,
+    vx: 0,
+    vy: 0.0005,
+  });
+
+  t += jitter(TIMING.SLOT_DESCENT * 0.85);
+  keyframes.push({
+    x: finalX + (rand() - 0.5) * 0.003,
+    y: 0.835,
+    t,
+    vx: 0,
+    vy: 0.0004,
+  });
+
+  t += jitter(TIMING.SLOT_DESCENT * 0.7);
+  keyframes.push({
+    x: finalX,
+    y: 0.862,
+    t,
+    vx: 0,
+    vy: 0.0003,
+  });
+
+  const landing = buildLandingPhase(keyframes[keyframes.length - 1], finalX, rand);
+  return densifyTrajectory([...keyframes, ...landing]);
+}
+
+/** Convert sparse flow keyframes into dense samples for buttery playback. */
+function densifyTrajectory(keyframes: TrajectorySample[]): TrajectorySample[] {
+  if (keyframes.length < 2) return keyframes;
+
+  const total = keyframes[keyframes.length - 1].t;
+  const samples: TrajectorySample[] = [];
+
+  for (let t = 0; t <= total; t += TIMING.SAMPLE_MS) {
+    const { pos, vx, vy } = interpolateFlow(keyframes, t);
+    samples.push({ x: pos.x, y: pos.y, t, vx, vy });
   }
 
   return samples;
 }
 
-function findNearestPeg(x: number, y: number, row: number): Peg | null {
-  const count = row + 3;
-  const py = rowY(row);
-  if (Math.abs(y - py) > 0.04) return null;
+function interpolateFlow(
+  keyframes: TrajectorySample[],
+  elapsed: number,
+): { pos: Point; vx: number; vy: number } {
+  const clamped = Math.min(Math.max(0, elapsed), keyframes[keyframes.length - 1].t);
 
-  let best: Peg | null = null;
-  let bestDist = Infinity;
-  for (let col = 0; col < count; col++) {
-    const px = 0.5 + (col - (count - 1) / 2) * PLINKO.PEG_SPACING;
-    const d = Math.hypot(x - px, y - py);
-    if (d < bestDist) {
-      bestDist = d;
-      best = { row, col, x: px, y: py };
-    }
-  }
-  return best;
+  let i = 0;
+  while (i < keyframes.length - 2 && keyframes[i + 1].t < clamped) i++;
+
+  const s0 = keyframes[Math.max(0, i - 1)];
+  const s1 = keyframes[i];
+  const s2 = keyframes[Math.min(keyframes.length - 1, i + 1)];
+  const s3 = keyframes[Math.min(keyframes.length - 1, i + 2)];
+
+  const segDur = s2.t - s1.t || 1;
+  let u = (clamped - s1.t) / segDur;
+  u = u * u * (3 - 2 * u);
+
+  const tx1 = (s2.x - s0.x) * 0.28;
+  const ty1 = Math.max(0.00025, (s2.y - s0.y) * 0.38);
+  const tx2 = (s3.x - s1.x) * 0.28;
+  const ty2 = Math.max(0.00025, (s3.y - s1.y) * 0.38);
+
+  const pos: Point = {
+    x: hermite(s1.x, tx1, s2.x, tx2, u),
+    y: hermite(s1.y, ty1 * segDur * 0.0012, s2.y, ty2 * segDur * 0.0012, u),
+  };
+
+  const nextU = Math.min(1, u + 0.025);
+  const nextX = hermite(s1.x, tx1, s2.x, tx2, nextU);
+  const nextY = hermite(s1.y, ty1 * segDur * 0.0012, s2.y, ty2 * segDur * 0.0012, nextU);
+
+  return {
+    pos,
+    vx: (nextX - pos.x) / 0.025,
+    vy: (nextY - pos.y) / 0.025,
+  };
 }
 
 function buildLandingPhase(
   last: TrajectorySample,
   finalX: number,
+  rand: () => number,
 ): TrajectorySample[] {
   const out: TrajectorySample[] = [];
-  let { x, y, t, vx, vy } = { ...last };
+  let { x, y, t } = last;
 
-  vx *= 0.6;
-  vy = Math.max(vy, 0.0012);
+  const bounceH = 0.011 + rand() * 0.005;
+  const phases = [
+    { x: finalX + (rand() - 0.5) * 0.004, y: BOARD.SLOT_Y, dur: 320, vy: -0.00035 },
+    { x: finalX + (rand() - 0.5) * 0.003, y: BOARD.SLOT_Y - bounceH, dur: 260, vy: 0.0002 },
+    { x: finalX, y: BOARD.SLOT_Y, dur: 280, vy: -0.00012 },
+    { x: finalX, y: BOARD.SLOT_Y + 0.007, dur: 340, vy: 0 },
+  ];
 
-  const slotHalf = (slotToX(1) - slotToX(0)) * 0.38;
-  let bounced = false;
-  let settled = false;
-  const maxSteps = 800;
-
-  for (let step = 0; step < maxSteps; step++) {
-    t += PHYSICS.SAMPLE_MS;
-    const dt = PHYSICS.DT;
-
-    vy += PHYSICS.GRAVITY * 0.85;
-    x += vx * dt;
-    y += vy * dt;
-
-    if (x < finalX - slotHalf) {
-      x = finalX - slotHalf;
-      vx = Math.abs(vx) * 0.35;
-    } else if (x > finalX + slotHalf) {
-      x = finalX + slotHalf;
-      vx = -Math.abs(vx) * 0.35;
+  for (const phase of phases) {
+    const steps = Math.max(1, Math.ceil(phase.dur / TIMING.SAMPLE_MS));
+    for (let i = 1; i <= steps; i++) {
+      const u = i / steps;
+      const ease = u * u * (3 - 2 * u);
+      t += phase.dur / steps;
+      x = x + (phase.x - x) * ease * 0.22;
+      y = y + (phase.y - y) * ease * 0.35 + phase.vy * (1 - ease);
+      out.push({ x, y, t, vx: (phase.x - x) * 0.001, vy: phase.vy });
     }
-
-    if (y >= BOARD.SLOT_Y && vy > 0) {
-      y = BOARD.SLOT_Y;
-      vy = -vy * (bounced ? 0.28 : 0.42);
-      vx *= 0.72;
-      bounced = true;
-    }
-
-    vx *= 0.97;
-    vy *= 0.998;
-
-    if (bounced && Math.abs(vy) < 0.00025 && y >= BOARD.SLOT_Y - 0.002) {
-      vy = 0;
-      vx *= 0.82;
-      x += (finalX - x) * 0.04;
-      settled = true;
-    }
-
-    out.push({ x, y, t, vx, vy });
-
-    if (settled && step > 40) break;
-    if (y > BOARD.SLOT_Y + 0.025 && bounced) break;
-  }
-
-  const restSteps = Math.ceil(220 / PHYSICS.SAMPLE_MS);
-  for (let i = 0; i < restSteps; i++) {
-    t += PHYSICS.SAMPLE_MS;
-    x += (finalX - x) * 0.06;
-    y = BOARD.SLOT_Y + 0.006 + Math.sin(i * 0.4) * 0.001 * Math.max(0, 1 - i / restSteps);
-    out.push({ x, y, t, vx: 0, vy: 0 });
   }
 
   return out;
@@ -323,6 +320,7 @@ function sampleTrajectory(
 ): { pos: Point; rot: number; vy: number; speed: number } {
   const total = samples[samples.length - 1].t;
   const clamped = Math.min(Math.max(0, elapsed), total);
+  const progress = clamped / total;
 
   let i = 0;
   while (i < samples.length - 2 && samples[i + 1].t < clamped) i++;
@@ -340,15 +338,18 @@ function sampleTrajectory(
     y: hermite(s1.y, (s2.y - s0.y) * 0.5, s2.y, (s3.y - s1.y) * 0.5, u),
   };
 
-  const nextU = Math.min(1, u + 0.03);
-  const nextX = hermite(s1.x, (s2.x - s0.x) * 0.5, s2.x, (s3.x - s1.x) * 0.5, nextU);
+  const microWobble = Math.sin(clamped * 0.006 + s1.x * 40) * 0.0012 * (1 - progress * 0.85);
+  pos.x += microWobble;
+
+  const nextU = Math.min(1, u + 0.018);
+  const nextX = hermite(s1.x, (s2.x - s0.x) * 0.5, s2.x, (s3.x - s1.x) * 0.5, nextU) + microWobble;
   const nextY = hermite(s1.y, (s2.y - s0.y) * 0.5, s2.y, (s3.y - s1.y) * 0.5, nextU);
 
   const dx = nextX - pos.x;
   const dy = nextY - pos.y;
   const speed = Math.hypot(dx, dy);
-  const vy = dy / 0.03;
-  const rot = Math.atan2(dx, dy) * (180 / Math.PI);
+  const vy = dy / 0.018;
+  const rot = Math.atan2(dx, Math.max(dy, 0.00001)) * (180 / Math.PI);
 
   return { pos, rot, vy, speed };
 }
@@ -444,9 +445,9 @@ export class PlinkoCanvasEngine {
 
       this.ball.x = pos.x;
       this.ball.y = pos.y;
-      this.ball.roll += speed * dt * 0.35;
-      this.ball.rot = rot * 0.15 + this.ball.roll;
-      this.ball.scale = 1 + Math.min(0.06, Math.abs(vy) * 0.4);
+      this.ball.roll += speed * dt * 0.22;
+      this.ball.rot = rot * 0.12 + this.ball.roll;
+      this.ball.scale = 1 + Math.min(0.04, Math.abs(vy) * 120);
 
       const landingStart = total * 0.86;
       if (elapsed > landingStart && !this.landingDone) {
